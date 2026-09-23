@@ -1,0 +1,11 @@
+.cache/
+.npm-cache/
+.android-sdk/
+.gradle/
+.idea/
+local.properties
+**/build/
+bin/
+dist/
+*.apk
+*.aab
