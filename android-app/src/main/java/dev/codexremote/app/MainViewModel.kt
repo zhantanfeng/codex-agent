@@ -26,6 +26,9 @@ data class UiState(
     val pairingCode: String? = null,
     val lastEventId: Long = 0,
     val error: String? = null,
+    val retryCommand: RemoteCommand? = null,
+    val threadLoaded: Boolean = false,
+    val closingSession: Boolean = false,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application), RemoteClient.Listener {
@@ -52,15 +55,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     fun loadThreads() = remote.command("threads.list")
 
     fun createThread(project: ProjectUi) {
+        update { it.copy(error = null, retryCommand = null) }
         remote.command("thread.start", JSONObject().put("projectId", project.id))
     }
 
     fun openThread(thread: ThreadUi) {
-        update { it.copy(selectedThread = thread, messages = emptyList(), approval = null) }
+        update {
+            it.copy(
+                selectedThread = thread,
+                messages = emptyList(),
+                approval = null,
+                error = null,
+                retryCommand = null,
+                threadLoaded = false,
+            )
+        }
         remote.command("thread.resume", JSONObject().put("threadId", thread.id))
     }
 
-    fun closeThread() = update { it.copy(selectedThread = null, messages = emptyList(), activeTurnId = null, approval = null) }
+    fun retry() {
+        val command = state.value.retryCommand ?: return
+        update { it.copy(error = null, retryCommand = null) }
+        remote.command(command.action, command.data())
+    }
+
+    fun closeThread() = update {
+        it.copy(
+            selectedThread = null,
+            messages = emptyList(),
+            activeTurnId = null,
+            approval = null,
+            error = null,
+            retryCommand = null,
+            threadLoaded = false,
+            closingSession = false,
+        )
+    }
+
+    fun closePhoneSession() {
+        val thread = state.value.selectedThread ?: return
+        if (!state.value.threadLoaded || state.value.activeTurnId != null || state.value.closingSession) return
+        update { it.copy(closingSession = true, error = null, retryCommand = null) }
+        remote.command("session.close", JSONObject().put("threadId", thread.id))
+    }
 
     fun send(text: String, steer: Boolean = false) {
         val thread = state.value.selectedThread ?: return
@@ -99,9 +136,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
         refresh()
     }
 
-    override fun onResponse(action: String, payload: JSONObject) {
+    override fun onResponse(command: RemoteCommand, payload: JSONObject) {
+        val action = command.action
         if (!payload.optBoolean("ok")) {
-            update { it.copy(error = payload.optString("error", "Request failed")) }
+            update {
+                it.copy(
+                    error = payload.optString("error", "Request failed"),
+                    retryCommand = command.takeIf { it.retryable },
+                    closingSession = if (action == "session.close") false else it.closingSession,
+                )
+            }
             return
         }
         val data = payload.opt("data")
@@ -121,7 +165,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                 val threadJson = root.optJSONObject("thread") ?: return
                 val thread = parseThread(threadJson)
                 val history = parseHistory(threadJson.optJSONArray("turns"))
-                update { it.copy(selectedThread = thread, messages = history, error = null) }
+                update {
+                    it.copy(
+                        selectedThread = thread,
+                        messages = history,
+                        error = null,
+                        retryCommand = null,
+                        threadLoaded = true,
+                    )
+                }
+            }
+            "session.close" -> {
+                update {
+                    it.copy(
+                        selectedThread = null,
+                        messages = emptyList(),
+                        activeTurnId = null,
+                        approval = null,
+                        error = null,
+                        retryCommand = null,
+                        threadLoaded = false,
+                        closingSession = false,
+                    )
+                }
+                loadThreads()
             }
             "events.sync" -> {
                 val synced = data as? JSONObject ?: return

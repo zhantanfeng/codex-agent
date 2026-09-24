@@ -35,6 +35,8 @@ type CodexClient struct {
 	nextID    atomic.Uint64
 	onMessage func(CodexMessage)
 	done      chan error
+	closeOnce sync.Once
+	closeErr  error
 }
 
 const supportedCodexVersionPrefix = "codex-cli 0.156."
@@ -76,7 +78,7 @@ func StartCodex(ctx context.Context, command string, log *slog.Logger, onMessage
 	defer cancel()
 	var initialized map[string]any
 	if err := client.Call(initCtx, "initialize", map[string]any{
-		"clientInfo":   map[string]any{"name": "codex-remote-agent", "title": "Codex Remote", "version": "0.1.0"},
+		"clientInfo":   map[string]any{"name": "codex-remote-agent", "title": "Codex Remote", "version": "0.1.3"},
 		"capabilities": map[string]any{"experimentalApi": false, "requestAttestation": false},
 	}, &initialized); err != nil {
 		_ = client.Close()
@@ -195,9 +197,17 @@ func (c *CodexClient) readLogs(reader io.Reader) {
 }
 
 func (c *CodexClient) Close() error {
-	_ = c.stdin.Close()
-	if c.cmd.Process != nil {
-		return c.cmd.Process.Kill()
-	}
-	return nil
+	c.closeOnce.Do(func() {
+		_ = c.stdin.Close()
+		if c.cmd.Process == nil {
+			return
+		}
+		_ = c.cmd.Process.Kill()
+		select {
+		case <-c.done:
+		case <-time.After(5 * time.Second):
+			c.closeErr = errors.New("timed out waiting for app-server to stop")
+		}
+	})
+	return c.closeErr
 }

@@ -6,6 +6,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,12 +21,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -34,6 +39,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
@@ -51,27 +57,38 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import java.text.DateFormat
 import java.util.Date
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 private val Ink = Color(0xFF202321)
 private val Canvas = Color(0xFFF7F8F5)
@@ -110,7 +127,15 @@ private fun App(model: MainViewModel) {
             state.selectedThread != null -> ConversationScreen(state, model)
             else -> HomeScreen(state, model)
         }
-        state.error?.let { ErrorBanner(it) }
+        state.error?.let {
+            ErrorBanner(
+                message = it,
+                canRetry = state.retryCommand != null,
+                canGoBack = state.selectedThread != null,
+                onRetry = model::retry,
+                onBack = model::closeThread,
+            )
+        }
         state.approval?.let { ApprovalDialog(it, model) }
         state.pairingCode?.let { PairingCodeDialog(it) }
     }
@@ -256,6 +281,9 @@ private fun ThreadRow(thread: ThreadUi, onClick: () -> Unit) {
 private fun ConversationScreen(state: UiState, model: MainViewModel) {
     var input by remember { mutableStateOf("") }
     val thread = state.selectedThread ?: return
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val showJumpToLatest by remember { derivedStateOf { listState.canScrollForward } }
     Scaffold(
         containerColor = Canvas,
         contentWindowInsets = WindowInsets(0),
@@ -270,6 +298,18 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
                 },
                 actions = {
                     if (state.activeTurnId != null) IconButton(onClick = model::interrupt) { Icon(Icons.Default.Stop, "Stop", tint = Coral) }
+                    if (state.threadLoaded) {
+                        IconButton(
+                            onClick = model::closePhoneSession,
+                            enabled = state.activeTurnId == null && !state.closingSession,
+                        ) {
+                            if (state.closingSession) {
+                                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Default.Close, "Close phone session")
+                            }
+                        }
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Canvas),
                 modifier = Modifier.statusBarsPadding(),
@@ -305,13 +345,91 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
             }
         },
     ) { padding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            items(state.messages, key = { it.id }) { message -> MessageBlock(message) }
-            if (state.activeTurnId != null) item { Text("Codex is working...", color = Moss, style = MaterialTheme.typography.labelMedium) }
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 32.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                items(state.messages, key = { it.id }) { message -> MessageBlock(message) }
+                if (state.activeTurnId != null) item { Text("Codex is working...", color = Moss, style = MaterialTheme.typography.labelMedium) }
+            }
+            ConversationScrollbar(listState, Modifier.align(Alignment.CenterEnd))
+            if (showJumpToLatest) {
+                SmallFloatingActionButton(
+                    onClick = {
+                        scope.launch {
+                            val lastIndex = listState.layoutInfo.totalItemsCount - 1
+                            if (lastIndex >= 0) {
+                                listState.scrollToItem(lastIndex)
+                                listState.scrollBy(Float.MAX_VALUE)
+                            }
+                        }
+                    },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 32.dp, bottom = 12.dp),
+                    containerColor = Paper,
+                    contentColor = Moss,
+                ) {
+                    Icon(Icons.Default.KeyboardArrowDown, "Jump to latest")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConversationScrollbar(state: LazyListState, modifier: Modifier = Modifier) {
+    val scope = rememberCoroutineScope()
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    var trackHeightPx by remember { mutableIntStateOf(0) }
+    var scrollJob by remember { mutableStateOf<Job?>(null) }
+    val layout = state.layoutInfo
+    val visibleItems = layout.visibleItemsInfo
+    val totalItems = layout.totalItemsCount
+    val viewportPx = (layout.viewportEndOffset - layout.viewportStartOffset).coerceAtLeast(1)
+    val averageItemPx = visibleItems.map { it.size }.average().takeIf { !it.isNaN() && it > 0 } ?: viewportPx.toDouble()
+    val estimatedContentPx = (averageItemPx * totalItems).coerceAtLeast(viewportPx.toDouble())
+    val maximumScrollPx = (estimatedContentPx - viewportPx).coerceAtLeast(0.0)
+    val currentScrollPx = (state.firstVisibleItemIndex * averageItemPx + state.firstVisibleItemScrollOffset)
+        .coerceIn(0.0, maximumScrollPx)
+    val progress = if (maximumScrollPx == 0.0) 0f else (currentScrollPx / maximumScrollPx).toFloat()
+    val minimumThumbPx = with(density) { 36.dp.toPx() }
+    val thumbHeightPx = if (trackHeightPx > 0) {
+        (trackHeightPx * viewportPx / estimatedContentPx).toFloat().coerceIn(minimumThumbPx.coerceAtMost(trackHeightPx.toFloat()), trackHeightPx.toFloat())
+    } else {
+        0f
+    }
+    val maximumThumbOffsetPx = (trackHeightPx - thumbHeightPx).coerceAtLeast(0f)
+    val thumbOffsetPx = progress * maximumThumbOffsetPx
+    val scrollable = state.canScrollBackward || state.canScrollForward
+
+    Box(
+        modifier = modifier.fillMaxHeight().width(24.dp).onSizeChanged { trackHeightPx = it.height }
+            .pointerInput(totalItems, trackHeightPx, estimatedContentPx) {
+                if (!scrollable || trackHeightPx <= 0 || maximumScrollPx <= 0.0) return@pointerInput
+
+                fun scrollToPosition(y: Float) {
+                    val ratio = ((y - thumbHeightPx / 2f) / maximumThumbOffsetPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+                    val targetPx = ratio * maximumScrollPx
+                    val targetIndex = (targetPx / averageItemPx).toInt().coerceIn(0, (totalItems - 1).coerceAtLeast(0))
+                    val targetOffset = (targetPx - targetIndex * averageItemPx).roundToInt().coerceAtLeast(0)
+                    scrollJob?.cancel()
+                    scrollJob = scope.launch { state.scrollToItem(targetIndex, targetOffset) }
+                }
+
+                detectVerticalDragGestures(
+                    onDragStart = { scrollToPosition(it.y) },
+                    onVerticalDrag = { change, _ -> scrollToPosition(change.position.y) },
+                )
+            },
+    ) {
+        if (scrollable && thumbHeightPx > 0f) {
+            Box(
+                Modifier.align(Alignment.TopCenter).offset { IntOffset(0, thumbOffsetPx.roundToInt()) }
+                    .width(4.dp).height(with(density) { thumbHeightPx.toDp() })
+                    .background(Muted.copy(alpha = 0.55f), RoundedCornerShape(2.dp)),
+            )
         }
     }
 }
@@ -377,8 +495,29 @@ private fun EmptyState() {
 }
 
 @Composable
-private fun ErrorBanner(message: String) {
-    Box(Modifier.fillMaxWidth().statusBarsPadding().padding(12.dp).background(Color(0xFFFFE9E5), RoundedCornerShape(6.dp)).padding(12.dp)) {
+private fun ErrorBanner(message: String, canRetry: Boolean, canGoBack: Boolean, onRetry: () -> Unit, onBack: () -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().statusBarsPadding().padding(12.dp)
+            .background(Color(0xFFFFE9E5), RoundedCornerShape(6.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
         Text(message, color = Coral, style = MaterialTheme.typography.bodySmall)
+        if (canGoBack || canRetry) {
+            Row(modifier = Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
+                if (canGoBack) {
+                    TextButton(onClick = onBack, colors = ButtonDefaults.textButtonColors(contentColor = Coral)) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Back")
+                    }
+                }
+                if (canRetry) {
+                    TextButton(onClick = onRetry, colors = ButtonDefaults.textButtonColors(contentColor = Coral)) {
+                        Icon(Icons.Default.Refresh, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Retry")
+                    }
+                }
+            }
+        }
     }
 }

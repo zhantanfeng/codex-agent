@@ -38,6 +38,30 @@ func TestThreadListIsEmptyWithoutProjects(t *testing.T) {
 	}
 }
 
+func TestThreadStartParamsUseStableAPI(t *testing.T) {
+	params := threadStartParams(`D:\demo`)
+	if params["cwd"] != `D:\demo` {
+		t.Fatalf("unexpected cwd: %#v", params["cwd"])
+	}
+	if _, ok := params["runtimeWorkspaceRoots"]; ok {
+		t.Fatal("thread/start must not send experimental runtimeWorkspaceRoots")
+	}
+}
+
+func TestPhoneSessionCannotCloseDuringActiveTurn(t *testing.T) {
+	runtime := &Runtime{
+		config:      &Config{Projects: map[string]string{"demo": `D:\demo`}},
+		threads:     map[string]bool{"thread-1": true},
+		activeTurns: map[string]string{"thread-1": "turn-1"},
+		queues:      map[string][]queuedTurn{},
+	}
+	raw, _ := json.Marshal(map[string]string{"threadId": "thread-1"})
+	_, err := runtime.execute(context.Background(), commandPayload{Action: "session.close", Data: raw})
+	if err == nil || err.Error() != "stop the active turn before closing the phone session" {
+		t.Fatalf("unexpected close result: %v", err)
+	}
+}
+
 func TestPairingSASIsStable(t *testing.T) {
 	first := pairingSAS("host", "phone", "client-key", "code")
 	second := pairingSAS("host", "phone", "client-key", "code")

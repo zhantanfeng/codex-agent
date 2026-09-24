@@ -8,6 +8,8 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.net.URI
+import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -23,6 +25,20 @@ data class PairingConfig(
     val code: String,
 )
 
+data class RemoteCommand(
+    val action: String,
+    val dataJson: String,
+) {
+    val retryable: Boolean
+        get() = action == "thread.start" || action == "thread.resume"
+
+    fun data(): JSONObject = JSONObject(dataJson)
+
+    companion object {
+        fun capture(action: String, data: JSONObject) = RemoteCommand(action, data.toString())
+    }
+}
+
 class RemoteClient(
     context: Context,
     private val listener: Listener,
@@ -30,7 +46,7 @@ class RemoteClient(
     interface Listener {
         fun onConnection(status: ConnectionStatus, detail: String = "")
         fun onPaired()
-        fun onResponse(action: String, payload: JSONObject)
+        fun onResponse(command: RemoteCommand, payload: JSONObject)
         fun onEvent(kind: String, payload: JSONObject)
     }
 
@@ -43,7 +59,7 @@ class RemoteClient(
         .pingInterval(25, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
-    private val pending = ConcurrentHashMap<String, String>()
+    private val pending = ConcurrentHashMap<String, RemoteCommand>()
     private var socket: WebSocket? = null
     private var pairingTimer: Timer? = null
     private var reconnectTimer: Timer? = null
@@ -130,7 +146,7 @@ class RemoteClient(
                         }
                         "response" -> {
                             val requestId = payload.getString("requestId")
-                            listener.onResponse(pending.remove(requestId) ?: "unknown", payload)
+                            listener.onResponse(pending.remove(requestId) ?: RemoteCommand("unknown", "{}"), payload)
                         }
                         else -> listener.onEvent(envelope.kind, payload)
                     }
@@ -174,7 +190,7 @@ class RemoteClient(
 
     fun command(action: String, data: JSONObject = JSONObject()): String {
         val requestId = UUID.randomUUID().toString()
-        pending[requestId] = action
+        pending[requestId] = RemoteCommand.capture(action, data)
         sendEnvelope(
             "command",
             JSONObject().put("requestId", requestId).put("action", action).put("data", data),
@@ -201,7 +217,13 @@ class RemoteClient(
         fun parsePairing(raw: String): PairingConfig {
             val value = raw.trim()
             val encoded = if (value.startsWith("codexremote://")) {
-                Uri.parse(value).getQueryParameter("data") ?: error("Missing pairing data")
+                URI(value).rawQuery
+                    ?.split('&')
+                    ?.firstOrNull { it.substringBefore('=') == "data" }
+                    ?.substringAfter('=', "")
+                    ?.let { URLDecoder.decode(it, StandardCharsets.UTF_8.name()) }
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: error("Missing pairing data")
             } else value
             val json = JSONObject(String(b64decode(encoded), StandardCharsets.UTF_8))
             require(json.getInt("version") == 1) { "Unsupported pairing version" }

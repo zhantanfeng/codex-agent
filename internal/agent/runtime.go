@@ -27,6 +27,9 @@ type Runtime struct {
 	signer      *protocol.Signer
 	guard       *protocol.ReplayGuard
 	log         *slog.Logger
+	runCtx      context.Context
+	commandMu   sync.Mutex
+	codexMu     sync.RWMutex
 	codex       *CodexClient
 	connMu      sync.Mutex
 	conn        *websocket.Conn
@@ -88,12 +91,15 @@ func NewRuntime(store *Store, config *Config, private ed25519.PrivateKey, log *s
 }
 
 func (r *Runtime) Run(ctx context.Context) error {
+	r.runCtx = ctx
 	codex, err := StartCodex(ctx, r.currentConfig().CodexCommand, r.log, r.onCodexMessage)
 	if err != nil {
 		return err
 	}
+	r.codexMu.Lock()
 	r.codex = codex
-	defer codex.Close()
+	r.codexMu.Unlock()
+	defer r.closeCodex()
 	backoff := time.Second
 	for ctx.Err() == nil {
 		if err := r.connect(ctx); err != nil {
@@ -231,6 +237,9 @@ func pairingSAS(hostPublic, clientID, clientPublic, code string) string {
 }
 
 func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, error) {
+	r.commandMu.Lock()
+	defer r.commandMu.Unlock()
+
 	config := r.currentConfig()
 	switch command.Action {
 	case "projects.list":
@@ -244,7 +253,7 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 			return map[string]any{"data": []any{}, "nextCursor": nil, "backwardsCursor": nil}, nil
 		}
 		var result map[string]any
-		err := r.codex.Call(ctx, "thread/list", map[string]any{"limit": 100, "sortKey": "recency_at", "sortDirection": "desc", "sourceKinds": []string{"cli", "vscode", "exec", "appServer", "unknown"}, "cwd": paths}, &result)
+		err := r.callCodex(ctx, "thread/list", map[string]any{"limit": 100, "sortKey": "recency_at", "sortDirection": "desc", "sourceKinds": []string{"cli", "vscode", "exec", "appServer", "unknown"}, "cwd": paths}, &result)
 		if err == nil {
 			r.markThreads(result)
 		}
@@ -261,7 +270,7 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 			return nil, errors.New("project is not in the Windows allowlist")
 		}
 		var result map[string]any
-		err := r.codex.Call(ctx, "thread/start", map[string]any{"cwd": path, "runtimeWorkspaceRoots": []string{path}}, &result)
+		err := r.callCodex(ctx, "thread/start", threadStartParams(path), &result)
 		if err == nil {
 			r.markThreadResult(result)
 		}
@@ -277,7 +286,7 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 			return nil, errors.New("thread is not in an allowed project")
 		}
 		var result map[string]any
-		if err := r.codex.Call(ctx, "thread/resume", map[string]any{"threadId": data.ThreadID, "excludeTurns": false}, &result); err != nil {
+		if err := r.callCodex(ctx, "thread/resume", map[string]any{"threadId": data.ThreadID, "excludeTurns": false}, &result); err != nil {
 			return nil, err
 		}
 		if !r.resultInAllowlist(result) {
@@ -285,6 +294,26 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 		}
 		r.markThreadResult(result)
 		return result, nil
+	case "session.close":
+		var data struct {
+			ThreadID string `json:"threadId"`
+		}
+		if err := json.Unmarshal(command.Data, &data); err != nil {
+			return nil, err
+		}
+		if !r.threadAllowed(data.ThreadID) {
+			return nil, errors.New("thread is not in an allowed project")
+		}
+		r.threadMu.Lock()
+		active := r.activeTurns[data.ThreadID]
+		r.threadMu.Unlock()
+		if active != "" {
+			return nil, errors.New("stop the active turn before closing the phone session")
+		}
+		if err := r.restartCodex(ctx); err != nil {
+			return nil, err
+		}
+		return map[string]any{"closed": true}, nil
 	case "turn.start":
 		var data struct {
 			ThreadID string `json:"threadId"`
@@ -308,7 +337,7 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 		r.activeTurns[data.ThreadID] = "starting:" + clientMessageID
 		r.threadMu.Unlock()
 		var result map[string]any
-		err := r.codex.Call(ctx, "turn/start", turnStartParams(data.ThreadID, data.Text, clientMessageID), &result)
+		err := r.callCodex(ctx, "turn/start", turnStartParams(data.ThreadID, data.Text, clientMessageID), &result)
 		if err != nil {
 			r.threadMu.Lock()
 			if r.activeTurns[data.ThreadID] == "starting:"+clientMessageID {
@@ -330,7 +359,7 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 			return nil, errors.New("thread is not allowed")
 		}
 		var result map[string]any
-		err := r.codex.Call(ctx, "turn/steer", map[string]any{"threadId": data.ThreadID, "expectedTurnId": data.TurnID, "input": []any{map[string]any{"type": "text", "text": data.Text, "text_elements": []any{}}}}, &result)
+		err := r.callCodex(ctx, "turn/steer", map[string]any{"threadId": data.ThreadID, "expectedTurnId": data.TurnID, "input": []any{map[string]any{"type": "text", "text": data.Text, "text_elements": []any{}}}}, &result)
 		return result, err
 	case "turn.interrupt":
 		var data struct{ ThreadID, TurnID string }
@@ -341,7 +370,7 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 			return nil, errors.New("thread is not allowed")
 		}
 		var result map[string]any
-		err := r.codex.Call(ctx, "turn/interrupt", map[string]any{"threadId": data.ThreadID, "turnId": data.TurnID}, &result)
+		err := r.callCodex(ctx, "turn/interrupt", map[string]any{"threadId": data.ThreadID, "turnId": data.TurnID}, &result)
 		return result, err
 	case "approval.respond":
 		var data struct {
@@ -410,17 +439,15 @@ func (r *Runtime) trackTurnLifecycle(message CodexMessage) {
 	if queued := r.queues[params.ThreadID]; len(queued) > 0 {
 		next = queued[0]
 		r.queues[params.ThreadID] = queued[1:]
+		r.activeTurns[params.ThreadID] = "starting:" + next.ClientMessageID
 	}
 	r.threadMu.Unlock()
 	if next.Text != "" {
-		r.threadMu.Lock()
-		r.activeTurns[params.ThreadID] = "starting:" + next.ClientMessageID
-		r.threadMu.Unlock()
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			var result map[string]any
-			if err := r.codex.Call(ctx, "turn/start", turnStartParams(params.ThreadID, next.Text, next.ClientMessageID), &result); err != nil {
+			if err := r.callCodex(ctx, "turn/start", turnStartParams(params.ThreadID, next.Text, next.ClientMessageID), &result); err != nil {
 				r.log.Error("start queued turn", "thread", params.ThreadID, "error", err)
 				r.threadMu.Lock()
 				if r.activeTurns[params.ThreadID] == "starting:"+next.ClientMessageID {
@@ -437,6 +464,10 @@ func turnStartParams(threadID, text, clientMessageID string) map[string]any {
 		"threadId": threadID, "clientUserMessageId": clientMessageID,
 		"input": []any{map[string]any{"type": "text", "text": text, "text_elements": []any{}}},
 	}
+}
+
+func threadStartParams(path string) map[string]any {
+	return map[string]any{"cwd": path}
 }
 
 func (r *Runtime) respondApproval(id, decision string) error {
@@ -469,7 +500,64 @@ func (r *Runtime) respondApproval(id, decision string) error {
 	default:
 		return fmt.Errorf("unsupported app-server request %s", request.Method)
 	}
-	return r.codex.Respond(request.ID, result)
+	return r.respondCodex(request.ID, result)
+}
+
+func (r *Runtime) callCodex(ctx context.Context, method string, params, target any) error {
+	r.codexMu.RLock()
+	defer r.codexMu.RUnlock()
+	if r.codex == nil {
+		return errors.New("Codex app-server is not running")
+	}
+	return r.codex.Call(ctx, method, params, target)
+}
+
+func (r *Runtime) respondCodex(id json.RawMessage, result any) error {
+	r.codexMu.RLock()
+	defer r.codexMu.RUnlock()
+	if r.codex == nil {
+		return errors.New("Codex app-server is not running")
+	}
+	return r.codex.Respond(id, result)
+}
+
+func (r *Runtime) restartCodex(ctx context.Context) error {
+	r.codexMu.Lock()
+	defer r.codexMu.Unlock()
+
+	old := r.codex
+	r.codex = nil
+	if old != nil {
+		if err := old.Close(); err != nil {
+			return fmt.Errorf("stop Codex app-server: %w", err)
+		}
+	}
+	r.threadMu.Lock()
+	r.activeTurns = map[string]string{}
+	r.queues = map[string][]queuedTurn{}
+	r.threadMu.Unlock()
+	r.approvalMu.Lock()
+	r.approvals = map[string]CodexMessage{}
+	r.approvalMu.Unlock()
+	processCtx := r.runCtx
+	if processCtx == nil {
+		processCtx = context.WithoutCancel(ctx)
+	}
+	client, err := StartCodex(processCtx, r.currentConfig().CodexCommand, r.log, r.onCodexMessage)
+	if err != nil {
+		return fmt.Errorf("restart Codex app-server: %w", err)
+	}
+	r.codex = client
+	return nil
+}
+
+func (r *Runtime) closeCodex() {
+	r.codexMu.Lock()
+	defer r.codexMu.Unlock()
+	if r.codex != nil {
+		_ = r.codex.Close()
+		r.codex = nil
+	}
 }
 
 func (r *Runtime) pendingApprovals() []map[string]any {
