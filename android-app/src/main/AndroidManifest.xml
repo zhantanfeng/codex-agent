@@ -6,7 +6,7 @@
     <application
         android:allowBackup="false"
         android:usesCleartextTraffic="true"
-        android:label="Codex Remote"
+        android:label="dcode"
         android:theme="@style/Theme.CodexRemote">
         <activity
             android:name=".MainActivity"
@@ -18,4 +18,3 @@
         </activity>
     </application>
 </manifest>
-
