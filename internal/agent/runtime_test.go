@@ -69,3 +69,24 @@ func TestPairingSASIsStable(t *testing.T) {
 		t.Fatalf("unexpected SAS %q %q", first, second)
 	}
 }
+
+func TestCodexVersionCompatibility(t *testing.T) {
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{version: "codex-cli 0.156.1", want: true},
+		{version: "codex-cli 0.161.0", want: true},
+		{version: "codex-cli 0.161.9", want: true},
+		{version: "codex-cli 0.157.0", want: false},
+		{version: "codex-cli 0.160.9", want: false},
+		{version: "codex-cli 0.162.0", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.version, func(t *testing.T) {
+			if got := isSupportedCodexVersion(test.version); got != test.want {
+				t.Fatalf("isSupportedCodexVersion(%q) = %t, want %t", test.version, got, test.want)
+			}
+		})
+	}
+}

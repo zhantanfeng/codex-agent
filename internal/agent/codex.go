@@ -39,7 +39,18 @@ type CodexClient struct {
 	closeErr  error
 }
 
-const supportedCodexVersionPrefix = "codex-cli 0.156."
+const supportedCodexVersionDescription = "0.156.x or 0.161.x"
+
+var supportedCodexVersionPrefixes = []string{"codex-cli 0.156.", "codex-cli 0.161."}
+
+func isSupportedCodexVersion(version string) bool {
+	for _, prefix := range supportedCodexVersionPrefixes {
+		if strings.HasPrefix(version, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 func StartCodex(ctx context.Context, command string, log *slog.Logger, onMessage func(CodexMessage)) (*CodexClient, error) {
 	executable, err := resolveCodexExecutable(command)
@@ -51,8 +62,8 @@ func StartCodex(ctx context.Context, command string, log *slog.Logger, onMessage
 		return nil, fmt.Errorf("check Codex CLI version: %w: %s", err, strings.TrimSpace(string(versionOutput)))
 	}
 	version := strings.TrimSpace(string(versionOutput))
-	if !strings.HasPrefix(version, supportedCodexVersionPrefix) {
-		return nil, fmt.Errorf("unsupported Codex CLI %q; this build requires 0.156.x", version)
+	if !isSupportedCodexVersion(version) {
+		return nil, fmt.Errorf("unsupported Codex CLI %q; this build requires %s", version, supportedCodexVersionDescription)
 	}
 	cmd := exec.CommandContext(ctx, executable, "app-server", "--stdio")
 	stdin, err := cmd.StdinPipe()
@@ -78,7 +89,7 @@ func StartCodex(ctx context.Context, command string, log *slog.Logger, onMessage
 	defer cancel()
 	var initialized map[string]any
 	if err := client.Call(initCtx, "initialize", map[string]any{
-		"clientInfo":   map[string]any{"name": "codex-remote-agent", "title": "Codex Remote", "version": "0.1.3"},
+		"clientInfo":   map[string]any{"name": "codex-remote-agent", "title": "Codex Remote", "version": "0.1.4"},
 		"capabilities": map[string]any{"experimentalApi": false, "requestAttestation": false},
 	}, &initialized); err != nil {
 		_ = client.Close()
