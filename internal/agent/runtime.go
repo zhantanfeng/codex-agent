@@ -94,6 +94,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 	r.runCtx = ctx
 	codex, err := StartCodex(ctx, r.currentConfig().CodexCommand, r.log, r.onCodexMessage)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 	r.codexMu.Lock()
@@ -102,7 +105,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 	defer r.closeCodex()
 	backoff := time.Second
 	for ctx.Err() == nil {
-		if err := r.connect(ctx); err != nil {
+		if err := r.connect(ctx); err != nil && ctx.Err() == nil {
 			r.log.Warn("relay connection ended", "error", err, "retry", backoff)
 		}
 		select {
@@ -131,6 +134,10 @@ func (r *Runtime) connect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// DialContext only cancels dialing. Close the established socket to unblock
+	// ReadMessage and any writes when the Agent receives Ctrl+C.
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
 	r.connMu.Lock()
 	r.conn = conn
 	r.connMu.Unlock()
@@ -184,7 +191,7 @@ func (r *Runtime) handleEnvelope(env protocol.Envelope) {
 	if err := protocol.DecodePayload(env, &command); err != nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(r.commandContext(), 60*time.Second)
 	defer cancel()
 	data, err := r.execute(ctx, command)
 	response := responsePayload{RequestID: command.RequestID, OK: err == nil, Data: data}
@@ -444,7 +451,7 @@ func (r *Runtime) trackTurnLifecycle(message CodexMessage) {
 	r.threadMu.Unlock()
 	if next.Text != "" {
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(r.commandContext(), 60*time.Second)
 			defer cancel()
 			var result map[string]any
 			if err := r.callCodex(ctx, "turn/start", turnStartParams(params.ThreadID, next.Text, next.ClientMessageID), &result); err != nil {
@@ -558,6 +565,13 @@ func (r *Runtime) closeCodex() {
 		_ = r.codex.Close()
 		r.codex = nil
 	}
+}
+
+func (r *Runtime) commandContext() context.Context {
+	if r.runCtx != nil {
+		return r.runCtx
+	}
+	return context.Background()
 }
 
 func (r *Runtime) pendingApprovals() []map[string]any {

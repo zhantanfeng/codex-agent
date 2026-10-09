@@ -26,17 +26,19 @@ type CodexMessage struct {
 }
 
 type CodexClient struct {
-	log       *slog.Logger
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	writeMu   sync.Mutex
-	pendingMu sync.Mutex
-	pending   map[string]chan CodexMessage
-	nextID    atomic.Uint64
-	onMessage func(CodexMessage)
-	done      chan error
-	closeOnce sync.Once
-	closeErr  error
+	log        *slog.Logger
+	processCtx context.Context
+	closing    atomic.Bool
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	writeMu    sync.Mutex
+	pendingMu  sync.Mutex
+	pending    map[string]chan CodexMessage
+	nextID     atomic.Uint64
+	onMessage  func(CodexMessage)
+	done       chan error
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 const supportedCodexVersionDescription = "0.156.x or 0.161.x"
@@ -78,7 +80,7 @@ func StartCodex(ctx context.Context, command string, log *slog.Logger, onMessage
 	if err != nil {
 		return nil, err
 	}
-	client := &CodexClient{log: log, cmd: cmd, stdin: stdin, pending: make(map[string]chan CodexMessage), onMessage: onMessage, done: make(chan error, 1)}
+	client := &CodexClient{log: log, processCtx: ctx, cmd: cmd, stdin: stdin, pending: make(map[string]chan CodexMessage), onMessage: onMessage, done: make(chan error, 1)}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s app-server: %w", command, err)
 	}
@@ -179,7 +181,7 @@ func (c *CodexClient) read(reader io.Reader) {
 	for {
 		var message CodexMessage
 		if err := decoder.Decode(&message); err != nil {
-			if !errors.Is(err, io.EOF) {
+			if !errors.Is(err, io.EOF) && !c.closing.Load() && (c.processCtx == nil || c.processCtx.Err() == nil) {
 				c.log.Error("app-server output failed", "error", err)
 			}
 			return
@@ -209,6 +211,7 @@ func (c *CodexClient) readLogs(reader io.Reader) {
 
 func (c *CodexClient) Close() error {
 	c.closeOnce.Do(func() {
+		c.closing.Store(true)
 		_ = c.stdin.Close()
 		if c.cmd.Process == nil {
 			return

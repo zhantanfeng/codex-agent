@@ -25,7 +25,7 @@ data class UiState(
     val approval: ApprovalUi? = null,
     val pairingCode: String? = null,
     val lastEventId: Long = 0,
-    val error: String? = null,
+    val error: UserFacingError? = null,
     val retryCommand: RemoteCommand? = null,
     val threadLoaded: Boolean = false,
     val closingSession: Boolean = false,
@@ -47,10 +47,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
             remote.configure(raw)
             update { it.copy(setupRequired = false, paired = false, error = null) }
             remote.connect()
-        }.onFailure { update { current -> current.copy(error = it.message) } }
+        }.onFailure { update { current -> current.copy(error = UserFacingError.fromMessage(it.message ?: "Pairing failed")) } }
     }
 
     fun reconnect() = remote.connect()
+    fun dismissError() = update { it.copy(error = null, retryCommand = null) }
     fun loadProjects() = remote.command("projects.list")
     fun loadThreads() = remote.command("threads.list")
 
@@ -127,8 +128,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     }
 
     override fun onConnection(status: RemoteClient.ConnectionStatus, detail: String) {
-        update { it.copy(connection = status, connectionDetail = detail) }
-        if (status == RemoteClient.ConnectionStatus.CONNECTED && remote.paired) refresh()
+        update {
+            val disconnected = status == RemoteClient.ConnectionStatus.ERROR || status == RemoteClient.ConnectionStatus.DISCONNECTED
+            it.copy(
+                connection = status,
+                connectionDetail = detail,
+                error = if (disconnected) UserFacingError.connectionUnavailable() else it.error,
+                closingSession = if (disconnected) false else it.closingSession,
+                threadLoaded = if (disconnected) false else it.threadLoaded,
+            )
+        }
+        if (status == RemoteClient.ConnectionStatus.CONNECTED && remote.paired) {
+            refresh()
+            state.value.selectedThread?.let {
+                remote.command("thread.resume", JSONObject().put("threadId", it.id))
+            }
+        }
     }
 
     override fun onPaired() {
@@ -139,11 +154,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     override fun onResponse(command: RemoteCommand, payload: JSONObject) {
         val action = command.action
         if (!payload.optBoolean("ok")) {
+            val error = UserFacingError.fromMessage(payload.optString("error", "Request failed"))
             update {
-                it.copy(
-                    error = payload.optString("error", "Request failed"),
-                    retryCommand = command.takeIf { it.retryable },
+                if (action == "thread.resume" && it.selectedThread?.id != command.data().optString("threadId")) it else it.copy(
+                    error = error,
+                    retryCommand = command.takeIf { it.retryable && !error.reconnectRequired },
                     closingSession = if (action == "session.close") false else it.closingSession,
+                    threadLoaded = if (error.reconnectRequired) false else it.threadLoaded,
                 )
             }
             return
@@ -158,7 +175,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
             "threads.list" -> {
                 val rows = (data as? JSONObject)?.optJSONArray("data") ?: JSONArray()
                 val threads = (0 until rows.length()).map { parseThread(rows.getJSONObject(it)) }
-                update { it.copy(threads = threads) }
+                update {
+                    it.copy(
+                        threads = threads,
+                        error = if (it.selectedThread == null && it.error?.reconnectRequired == true) null else it.error,
+                    )
+                }
             }
             "thread.start", "thread.resume" -> {
                 val root = data as? JSONObject ?: return
@@ -166,7 +188,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                 val thread = parseThread(threadJson)
                 val history = parseHistory(threadJson.optJSONArray("turns"))
                 update {
-                    it.copy(
+                    if (action == "thread.resume" && it.selectedThread?.id != thread.id) it else it.copy(
                         selectedThread = thread,
                         messages = history,
                         error = null,
@@ -205,6 +227,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
             "pair.pending" -> update { it.copy(pairingCode = payload.optString("verificationCode")) }
             "codex.event" -> handleCodexEvent(payload)
             "codex.request" -> handleApproval(payload)
+            "host.status" -> if (payload.optBoolean("online")) {
+                refresh()
+                state.value.selectedThread?.takeIf { !state.value.threadLoaded }?.let {
+                    remote.command("thread.resume", JSONObject().put("threadId", it.id))
+                }
+            }
         }
     }
 
@@ -232,7 +260,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
             )
             "item/started", "item/completed" -> upsertItem(params.optJSONObject("item"))
             "turn/diff/updated" -> upsertMessage("diff-${params.optString("turnId")}", "diff", params.optString("diff"), "Workspace diff")
-            "error" -> update { it.copy(error = params.optJSONObject("error")?.optString("message") ?: "Codex error") }
+            "error" -> update {
+                it.copy(error = UserFacingError.fromMessage(params.optJSONObject("error")?.optString("message") ?: "Codex error"))
+            }
         }
         if (eventId > 0) update { it.copy(lastEventId = eventId) }
     }

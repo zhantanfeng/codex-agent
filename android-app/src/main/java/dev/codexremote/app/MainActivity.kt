@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -11,15 +12,18 @@ import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -101,6 +105,7 @@ private val Line = Color(0xFFDDE1DB)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContent {
             MaterialTheme(
                 colorScheme = MaterialTheme.colorScheme.copy(
@@ -129,11 +134,13 @@ private fun App(model: MainViewModel) {
         }
         state.error?.let {
             ErrorBanner(
-                message = it,
+                error = it,
                 canRetry = state.retryCommand != null,
                 canGoBack = state.selectedThread != null,
                 onRetry = model::retry,
                 onBack = model::closeThread,
+                onReconnect = model::reconnect,
+                onDismiss = model::dismissError,
             )
         }
         state.approval?.let { ApprovalDialog(it, model) }
@@ -208,7 +215,7 @@ private fun SetupScreen(state: UiState, model: MainViewModel) {
 private fun HomeScreen(state: UiState, model: MainViewModel) {
     Scaffold(
         containerColor = Canvas,
-        contentWindowInsets = WindowInsets(0),
+        contentWindowInsets = WindowInsets.navigationBars,
         topBar = {
             TopAppBar(
                 title = {
@@ -219,11 +226,10 @@ private fun HomeScreen(state: UiState, model: MainViewModel) {
                 },
                 actions = { IconButton(onClick = model::reconnect) { Icon(Icons.Default.Refresh, "Reconnect") } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Canvas),
-                modifier = Modifier.statusBarsPadding(),
             )
         },
     ) { padding ->
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 28.dp)) {
+        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding), contentPadding = PaddingValues(bottom = 28.dp)) {
             item { SectionHeader("Projects", "Start a new Codex session") }
             items(state.projects, key = { it.id }) { project -> ProjectRow(project) { model.createThread(project) } }
             item { SectionHeader("Recent sessions", "Running on your Windows computer") }
@@ -285,6 +291,8 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
     val scope = rememberCoroutineScope()
     val showJumpToLatest by remember { derivedStateOf { listState.canScrollForward } }
     Scaffold(
+        // Apply IME space once to the whole screen, keeping the composer above the keyboard.
+        modifier = Modifier.fillMaxSize().imePadding(),
         containerColor = Canvas,
         contentWindowInsets = WindowInsets(0),
         topBar = {
@@ -312,12 +320,11 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Canvas),
-                modifier = Modifier.statusBarsPadding(),
             )
         },
         bottomBar = {
             Row(
-                Modifier.fillMaxWidth().background(Paper).navigationBarsPadding().imePadding().padding(12.dp),
+                Modifier.fillMaxWidth().background(Paper).navigationBarsPadding().padding(12.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
                 OutlinedTextField(
@@ -345,7 +352,7 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
             }
         },
     ) { padding ->
-        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+        Box(modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
@@ -495,28 +502,54 @@ private fun EmptyState() {
 }
 
 @Composable
-private fun ErrorBanner(message: String, canRetry: Boolean, canGoBack: Boolean, onRetry: () -> Unit, onBack: () -> Unit) {
+private fun ErrorBanner(
+    error: UserFacingError,
+    canRetry: Boolean,
+    canGoBack: Boolean,
+    onRetry: () -> Unit,
+    onBack: () -> Unit,
+    onReconnect: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val notice = error.sessionInUse || error.reconnectRequired
+    val contentColor = if (notice) Color(0xFF825A12) else Coral
+    val backgroundColor = if (notice) Color(0xFFFFF3D9) else Color(0xFFFFE9E5)
     Column(
         Modifier.fillMaxWidth().statusBarsPadding().padding(12.dp)
-            .background(Color(0xFFFFE9E5), RoundedCornerShape(6.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
+            .background(backgroundColor, RoundedCornerShape(6.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        Text(message, color = Coral, style = MaterialTheme.typography.bodySmall)
-        if (canGoBack || canRetry) {
-            Row(modifier = Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
-                if (canGoBack) {
-                    TextButton(onClick = onBack, colors = ButtonDefaults.textButtonColors(contentColor = Coral)) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Back")
-                    }
+        if (notice) {
+            Text(
+                if (error.sessionInUse) "此会话正在电脑端或其他客户端中使用" else "连接暂时不可用",
+                color = contentColor,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(bottom = 4.dp),
+            )
+        }
+        Text(error.message, color = contentColor, style = MaterialTheme.typography.bodySmall)
+        FlowRow(modifier = Modifier.align(Alignment.End), horizontalArrangement = Arrangement.End) {
+            if (canGoBack) {
+                TextButton(onClick = onBack, colors = ButtonDefaults.textButtonColors(contentColor = contentColor)) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("返回主界面")
                 }
-                if (canRetry) {
-                    TextButton(onClick = onRetry, colors = ButtonDefaults.textButtonColors(contentColor = Coral)) {
-                        Icon(Icons.Default.Refresh, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Retry")
-                    }
+            }
+            if (canRetry) {
+                TextButton(onClick = onRetry, colors = ButtonDefaults.textButtonColors(contentColor = contentColor)) {
+                    Icon(Icons.Default.Refresh, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("重试")
                 }
+            }
+            if (error.reconnectRequired) {
+                TextButton(onClick = onReconnect, colors = ButtonDefaults.textButtonColors(contentColor = contentColor)) {
+                    Text("重新连接")
+                }
+            }
+            TextButton(onClick = onDismiss, colors = ButtonDefaults.textButtonColors(contentColor = contentColor)) {
+                Text("关闭提示")
             }
         }
     }

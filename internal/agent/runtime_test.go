@@ -2,11 +2,94 @@ package agent
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
+
+func TestRelayReadUnblocksWhenAgentIsCanceled(t *testing.T) {
+	ready := make(chan struct{})
+	disconnected := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		conn, err := upgrader.Upgrade(w, request, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil { // Agent hello.
+			return
+		}
+		if _, _, err := conn.ReadMessage(); err != nil { // Online status.
+			return
+		}
+		close(ready)
+		_, _, _ = conn.ReadMessage() // Relay sends no messages while idle.
+		close(disconnected)
+	}))
+	defer server.Close()
+	_, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := NewRuntime(nil, &Config{HostID: "host-test", RelayURL: "ws" + strings.TrimPrefix(server.URL, "http")}, private, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runtime.connect(ctx) }()
+	defer func() {
+		runtime.connMu.Lock()
+		if runtime.conn != nil {
+			_ = runtime.conn.Close()
+		}
+		runtime.connMu.Unlock()
+	}()
+	select {
+	case <-ready:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Agent did not connect to the test relay")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Agent is still blocked in ReadMessage after cancellation")
+	}
+	select {
+	case <-disconnected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("relay connection stayed open after cancellation")
+	}
+	runtime.connMu.Lock()
+	defer runtime.connMu.Unlock()
+	if runtime.conn != nil {
+		t.Fatal("Agent retained the closed relay connection")
+	}
+}
+
+func TestCommandCancellationFollowsAgentShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	runtime := &Runtime{runCtx: ctx}
+	commandCtx, commandCancel := context.WithTimeout(runtime.commandContext(), time.Minute)
+	defer commandCancel()
+	cancel()
+	select {
+	case <-commandCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("in-flight command did not stop when the Agent was canceled")
+	}
+}
 
 func TestTurnIsQueuedWhenThreadIsActive(t *testing.T) {
 	runtime := &Runtime{
