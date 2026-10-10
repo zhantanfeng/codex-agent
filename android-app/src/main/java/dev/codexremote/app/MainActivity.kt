@@ -1,10 +1,15 @@
 package dev.codexremote.app
 
 import android.os.Bundle
+import android.graphics.BitmapFactory
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts.PickMultipleVisualMedia
+import androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -22,6 +27,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -31,6 +38,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -43,6 +51,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
@@ -55,6 +64,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -67,19 +77,29 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.PlainTooltip
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -91,7 +111,9 @@ import com.journeyapps.barcodescanner.ScanOptions
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 private val Ink = Color(0xFF202321)
@@ -135,7 +157,7 @@ private fun App(model: MainViewModel) {
         state.error?.let {
             ErrorBanner(
                 error = it,
-                canRetry = state.retryCommand != null,
+                canRetry = state.retryCommand != null || (state.draftImages.isNotEmpty() && state.threadLoaded && !state.sending && !it.reconnectRequired),
                 canGoBack = state.selectedThread != null,
                 onRetry = model::retry,
                 onBack = model::closeThread,
@@ -285,8 +307,11 @@ private fun ThreadRow(thread: ThreadUi, onClick: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ConversationScreen(state: UiState, model: MainViewModel) {
-    var input by remember { mutableStateOf("") }
+    val input = state.draftText
     val thread = state.selectedThread ?: return
+    val imagePicker = rememberLauncherForActivityResult(PickMultipleVisualMedia(MAX_MESSAGE_IMAGES)) { model.addImages(it) }
+    val canSend = state.threadLoaded && !state.sending && !state.preparingImages && !state.closingSession &&
+        (input.isNotBlank() || state.draftImages.isNotEmpty())
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val showJumpToLatest by remember { derivedStateOf { listState.canScrollForward } }
@@ -309,7 +334,7 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
                     if (state.threadLoaded) {
                         IconButton(
                             onClick = model::closePhoneSession,
-                            enabled = state.activeTurnId == null && !state.closingSession,
+                            enabled = state.activeTurnId == null && !state.closingSession && !state.sending,
                         ) {
                             if (state.closingSession) {
                                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
@@ -323,31 +348,62 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
             )
         },
         bottomBar = {
-            Row(
+            Column(
                 Modifier.fillMaxWidth().background(Paper).navigationBarsPadding().padding(12.dp),
-                verticalAlignment = Alignment.Bottom,
             ) {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text(if (state.activeTurnId == null) "Message Codex" else "Queue or steer Codex") },
-                    maxLines = 5,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = { model.send(input); input = "" }),
-                )
-                Spacer(Modifier.width(8.dp))
-                if (state.activeTurnId != null) {
-                    OutlinedButton(
-                        onClick = { model.send(input, steer = true); input = "" },
-                        enabled = input.isNotBlank(),
-                        contentPadding = PaddingValues(horizontal = 12.dp),
-                        modifier = Modifier.height(56.dp),
-                    ) { Text("Steer") }
-                    Spacer(Modifier.width(8.dp))
+                if (state.draftImages.isNotEmpty()) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 8.dp)) {
+                        items(state.draftImages, key = { it.id }) { image ->
+                            Box(Modifier.size(80.dp)) {
+                                AttachmentPreview(image.previewPath, image.name, Modifier.fillMaxSize())
+                                IconButton(
+                                    onClick = { model.removeImage(image.id) },
+                                    enabled = !state.sending,
+                                    modifier = Modifier.align(Alignment.TopEnd).size(32.dp).background(Paper, RoundedCornerShape(4.dp)),
+                                ) { Icon(Icons.Default.Close, "移除图片", modifier = Modifier.size(18.dp)) }
+                            }
+                        }
+                    }
                 }
-                FilledIconButton(onClick = { model.send(input); input = "" }, enabled = input.isNotBlank()) {
-                    Icon(Icons.Default.Send, "Send")
+                if (state.preparingImages || state.sending) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Text(
+                        if (state.preparingImages) "正在处理图片…" else state.uploadProgress.ifBlank { "正在发送…" },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Moss,
+                        modifier = Modifier.padding(vertical = 6.dp),
+                    )
+                }
+                Row(verticalAlignment = Alignment.Bottom) {
+                    TooltipBox(
+                        positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                        tooltip = { PlainTooltip { Text("添加图片") } },
+                        state = rememberTooltipState(),
+                    ) {
+                        IconButton(
+                            onClick = { imagePicker.launch(PickVisualMediaRequest(PickVisualMedia.ImageOnly)) },
+                            enabled = state.threadLoaded && !state.sending && !state.preparingImages && state.draftImages.size < MAX_MESSAGE_IMAGES,
+                        ) { Icon(Icons.Default.Image, "添加图片") }
+                    }
+                    OutlinedTextField(
+                        value = input,
+                        onValueChange = model::updateDraft,
+                        enabled = !state.sending,
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text(if (state.activeTurnId == null) "Message Codex" else "Queue or steer Codex") },
+                        maxLines = 5,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = { if (canSend) model.send(input) }),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    FilledIconButton(onClick = { model.send(input) }, enabled = canSend) {
+                        Icon(Icons.Default.Send, "Send")
+                    }
+                }
+                if (state.activeTurnId != null) {
+                    TextButton(onClick = { model.send(input, steer = true) }, enabled = canSend, modifier = Modifier.align(Alignment.End)) {
+                        Text("Steer")
+                    }
                 }
             }
         },
@@ -359,7 +415,9 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
                 contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 32.dp, bottom = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                items(state.messages, key = { it.id }) { message -> MessageBlock(message) }
+                items(state.messages, key = { it.id }) { message ->
+                    MessageBlock(message, state.imagePreviews) { model.loadImagePreview(thread.id, it) }
+                }
                 if (state.activeTurnId != null) item { Text("Codex is working...", color = Moss, style = MaterialTheme.typography.labelMedium) }
             }
             ConversationScrollbar(listState, Modifier.align(Alignment.CenterEnd))
@@ -442,7 +500,7 @@ private fun ConversationScrollbar(state: LazyListState, modifier: Modifier = Mod
 }
 
 @Composable
-private fun MessageBlock(message: MessageUi) {
+private fun MessageBlock(message: MessageUi, previews: Map<String, String>, loadPreview: (String) -> Unit) {
     val user = message.role == "user"
     val technical = message.role in setOf("command", "file", "diff")
     Column(
@@ -451,7 +509,48 @@ private fun MessageBlock(message: MessageUi) {
             .padding(14.dp),
     ) {
         if (message.detail.isNotBlank()) Text(message.detail, style = MaterialTheme.typography.labelMedium, color = if (technical) Coral else Muted)
-        Text(message.text.ifBlank { "Waiting for output..." }, fontFamily = if (technical) FontFamily.Monospace else FontFamily.Default, style = MaterialTheme.typography.bodyMedium)
+        if (message.images.isNotEmpty()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                message.images.forEach { image ->
+                    val preview = image.previewPath ?: previews[image.id]
+                    if (image.id.isNotBlank()) LaunchedEffect(image.id) { loadPreview(image.id) }
+                    AttachmentPreview(preview, image.name, Modifier.size(120.dp), onRetry = { loadPreview(image.id) })
+                }
+            }
+        }
+        if (message.text.isNotBlank() || message.images.isEmpty()) {
+            Text(
+                message.text.ifBlank { "Waiting for output..." },
+                modifier = Modifier.padding(top = if (message.images.isNotEmpty()) 8.dp else 0.dp),
+                fontFamily = if (technical) FontFamily.Monospace else FontFamily.Default,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AttachmentPreview(path: String?, name: String, modifier: Modifier = Modifier, onRetry: () -> Unit = {}) {
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, path) {
+        value = if (path == null) null else withContext(Dispatchers.IO) { BitmapFactory.decodeFile(path)?.asImageBitmap() }
+    }
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier.background(Color(0xFFF0F1EE), RoundedCornerShape(4.dp)).clickable {
+        if (bitmap != null) expanded = true else onRetry()
+    }, contentAlignment = Alignment.Center) {
+        if (bitmap != null) Image(bitmap!!, name, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+        else Icon(Icons.Default.Image, name, tint = Muted)
+    }
+    if (expanded && bitmap != null) {
+        Dialog(onDismissRequest = { expanded = false }) {
+            Column(Modifier.fillMaxWidth().background(Paper, RoundedCornerShape(6.dp)).padding(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(name, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 2)
+                    IconButton(onClick = { expanded = false }) { Icon(Icons.Default.Close, "关闭图片") }
+                }
+                Image(bitmap!!, name, Modifier.fillMaxWidth().heightIn(max = 480.dp).aspectRatio(bitmap!!.width.toFloat() / bitmap!!.height), contentScale = ContentScale.Fit)
+            }
+        }
     }
 }
 

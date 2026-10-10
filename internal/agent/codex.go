@@ -91,7 +91,7 @@ func StartCodex(ctx context.Context, command string, log *slog.Logger, onMessage
 	defer cancel()
 	var initialized map[string]any
 	if err := client.Call(initCtx, "initialize", map[string]any{
-		"clientInfo":   map[string]any{"name": "codex-remote-agent", "title": "Codex Remote", "version": "0.1.4"},
+		"clientInfo":   map[string]any{"name": "codex-remote-agent", "title": "Codex Remote", "version": "0.1.8"},
 		"capabilities": map[string]any{"experimentalApi": false, "requestAttestation": false},
 	}, &initialized); err != nil {
 		_ = client.Close()

@@ -48,9 +48,11 @@ type Runtime struct {
 type queuedTurn struct {
 	Text            string
 	ClientMessageID string
+	ImagePaths      []string
 }
 
 type commandPayload struct {
+	clientID  string
 	RequestID string          `json:"requestId"`
 	Action    string          `json:"action"`
 	Data      json.RawMessage `json:"data"`
@@ -162,7 +164,8 @@ func (r *Runtime) connect(ctx context.Context) error {
 		if err := json.Unmarshal(raw, &env); err != nil || env.TargetID != config.HostID {
 			continue
 		}
-		go r.handleEnvelope(env)
+		// Verify sequence numbers in socket order before executing asynchronously.
+		r.handleEnvelope(env)
 	}
 }
 
@@ -191,6 +194,11 @@ func (r *Runtime) handleEnvelope(env protocol.Envelope) {
 	if err := protocol.DecodePayload(env, &command); err != nil {
 		return
 	}
+	command.clientID = env.SenderID
+	go r.handleCommand(env.SenderID, command)
+}
+
+func (r *Runtime) handleCommand(clientID string, command commandPayload) {
 	ctx, cancel := context.WithTimeout(r.commandContext(), 60*time.Second)
 	defer cancel()
 	data, err := r.execute(ctx, command)
@@ -198,7 +206,7 @@ func (r *Runtime) handleEnvelope(env protocol.Envelope) {
 	if err != nil {
 		response.Error = err.Error()
 	}
-	_ = r.send(env.SenderID, "response", response)
+	_ = r.send(clientID, "response", response)
 }
 
 func (r *Runtime) handlePairing(env protocol.Envelope) {
@@ -249,6 +257,8 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 
 	config := r.currentConfig()
 	switch command.Action {
+	case "image.begin", "image.chunk", "image.finish", "image.thumbnail":
+		return r.imageCommand(command)
 	case "projects.list":
 		return config.Projects, nil
 	case "threads.list":
@@ -300,6 +310,7 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 			return nil, errors.New("thread working directory is not in the allowlist")
 		}
 		r.markThreadResult(result)
+		r.annotateThreadImages(result)
 		return result, nil
 	case "session.close":
 		var data struct {
@@ -323,20 +334,25 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 		return map[string]any{"closed": true}, nil
 	case "turn.start":
 		var data struct {
-			ThreadID string `json:"threadId"`
-			Text     string `json:"text"`
+			ThreadID string   `json:"threadId"`
+			Text     string   `json:"text"`
+			ImageIDs []string `json:"imageIds"`
 		}
 		if err := json.Unmarshal(command.Data, &data); err != nil {
 			return nil, err
 		}
-		if !r.threadAllowed(data.ThreadID) || strings.TrimSpace(data.Text) == "" {
+		if !r.threadAllowed(data.ThreadID) || (strings.TrimSpace(data.Text) == "" && len(data.ImageIDs) == 0) {
 			return nil, errors.New("thread is not loaded from an allowed project or message is empty")
+		}
+		images, err := r.imagePaths(data.ThreadID, command.clientID, data.ImageIDs)
+		if err != nil {
+			return nil, err
 		}
 		clientMessageID := command.RequestID
 		r.threadMu.Lock()
 		activeTurn := r.activeTurns[data.ThreadID]
 		if activeTurn != "" {
-			r.queues[data.ThreadID] = append(r.queues[data.ThreadID], queuedTurn{Text: data.Text, ClientMessageID: clientMessageID})
+			r.queues[data.ThreadID] = append(r.queues[data.ThreadID], queuedTurn{Text: data.Text, ClientMessageID: clientMessageID, ImagePaths: images})
 			position := len(r.queues[data.ThreadID])
 			r.threadMu.Unlock()
 			return map[string]any{"queued": true, "position": position, "activeTurnId": activeTurn}, nil
@@ -344,7 +360,7 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 		r.activeTurns[data.ThreadID] = "starting:" + clientMessageID
 		r.threadMu.Unlock()
 		var result map[string]any
-		err := r.callCodex(ctx, "turn/start", turnStartParams(data.ThreadID, data.Text, clientMessageID), &result)
+		err = r.callCodex(ctx, "turn/start", turnStartParams(data.ThreadID, data.Text, clientMessageID, images...), &result)
 		if err != nil {
 			r.threadMu.Lock()
 			if r.activeTurns[data.ThreadID] == "starting:"+clientMessageID {
@@ -355,9 +371,10 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 		return result, err
 	case "turn.steer":
 		var data struct {
-			ThreadID string `json:"threadId"`
-			TurnID   string `json:"turnId"`
-			Text     string `json:"text"`
+			ThreadID string   `json:"threadId"`
+			TurnID   string   `json:"turnId"`
+			Text     string   `json:"text"`
+			ImageIDs []string `json:"imageIds"`
 		}
 		if err := json.Unmarshal(command.Data, &data); err != nil {
 			return nil, err
@@ -365,8 +382,12 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 		if !r.threadAllowed(data.ThreadID) {
 			return nil, errors.New("thread is not allowed")
 		}
+		images, err := r.imagePaths(data.ThreadID, command.clientID, data.ImageIDs)
+		if err != nil {
+			return nil, err
+		}
 		var result map[string]any
-		err := r.callCodex(ctx, "turn/steer", map[string]any{"threadId": data.ThreadID, "expectedTurnId": data.TurnID, "input": []any{map[string]any{"type": "text", "text": data.Text, "text_elements": []any{}}}}, &result)
+		err = r.callCodex(ctx, "turn/steer", map[string]any{"threadId": data.ThreadID, "expectedTurnId": data.TurnID, "input": turnInput(data.Text, images)}, &result)
 		return result, err
 	case "turn.interrupt":
 		var data struct{ ThreadID, TurnID string }
@@ -400,6 +421,16 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 }
 
 func (r *Runtime) onCodexMessage(message CodexMessage) {
+	if message.Method == "item/started" || message.Method == "item/completed" {
+		var params map[string]any
+		if json.Unmarshal(message.Params, &params) == nil {
+			threadID, _ := params["threadId"].(string)
+			if item, ok := params["item"].(map[string]any); ok {
+				r.annotateImages(threadID, []any{item})
+				message.Params, _ = json.Marshal(params)
+			}
+		}
+	}
 	if len(message.ID) > 0 && message.Method != "" {
 		id := string(message.ID)
 		r.approvalMu.Lock()
@@ -449,12 +480,12 @@ func (r *Runtime) trackTurnLifecycle(message CodexMessage) {
 		r.activeTurns[params.ThreadID] = "starting:" + next.ClientMessageID
 	}
 	r.threadMu.Unlock()
-	if next.Text != "" {
+	if next.Text != "" || len(next.ImagePaths) > 0 {
 		go func() {
 			ctx, cancel := context.WithTimeout(r.commandContext(), 60*time.Second)
 			defer cancel()
 			var result map[string]any
-			if err := r.callCodex(ctx, "turn/start", turnStartParams(params.ThreadID, next.Text, next.ClientMessageID), &result); err != nil {
+			if err := r.callCodex(ctx, "turn/start", turnStartParams(params.ThreadID, next.Text, next.ClientMessageID, next.ImagePaths...), &result); err != nil {
 				r.log.Error("start queued turn", "thread", params.ThreadID, "error", err)
 				r.threadMu.Lock()
 				if r.activeTurns[params.ThreadID] == "starting:"+next.ClientMessageID {
@@ -466,11 +497,22 @@ func (r *Runtime) trackTurnLifecycle(message CodexMessage) {
 	}
 }
 
-func turnStartParams(threadID, text, clientMessageID string) map[string]any {
+func turnStartParams(threadID, text, clientMessageID string, imagePaths ...string) map[string]any {
 	return map[string]any{
 		"threadId": threadID, "clientUserMessageId": clientMessageID,
-		"input": []any{map[string]any{"type": "text", "text": text, "text_elements": []any{}}},
+		"input": turnInput(text, imagePaths),
 	}
+}
+
+func turnInput(text string, imagePaths []string) []any {
+	input := make([]any, 0, len(imagePaths)+1)
+	if strings.TrimSpace(text) != "" {
+		input = append(input, map[string]any{"type": "text", "text": text, "text_elements": []any{}})
+	}
+	for _, path := range imagePaths {
+		input = append(input, map[string]any{"type": "localImage", "path": path})
+	}
+	return input
 }
 
 func threadStartParams(path string) map[string]any {
@@ -615,12 +657,12 @@ func (r *Runtime) broadcast(kind string, payload any) error {
 }
 
 func (r *Runtime) sendOn(conn *websocket.Conn, target, kind string, payload any) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
 	env, err := r.signer.Sign(target, kind, payload)
 	if err != nil {
 		return err
 	}
-	r.writeMu.Lock()
-	defer r.writeMu.Unlock()
 	return conn.WriteJSON(env)
 }
 

@@ -12,10 +12,14 @@ import java.net.URI
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.Timer
 import kotlin.concurrent.fixedRateTimer
 import kotlin.concurrent.schedule
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeout
 
 data class PairingConfig(
     val relayUrl: String,
@@ -33,7 +37,7 @@ data class RemoteCommand(
 
     val responseTimeoutMs: Long
         get() = when (action) {
-            "projects.list", "threads.list", "events.sync" -> 15_000L
+            "projects.list", "threads.list", "events.sync", "image.begin", "image.chunk", "image.finish", "image.thumbnail" -> 15_000L
             else -> 65_000L // Allow the Agent's 60-second command timeout to finish first.
         }
 
@@ -65,6 +69,7 @@ class RemoteClient(
         .retryOnConnectionFailure(true)
         .build()
     private val pending = PendingCommands()
+    private val awaited = ConcurrentHashMap<String, CompletableDeferred<JSONObject>>()
     private var socket: WebSocket? = null
     private var pairingTimer: Timer? = null
     private var reconnectTimer: Timer? = null
@@ -100,6 +105,7 @@ class RemoteClient(
         connectionGeneration += 1
         val generation = connectionGeneration
         socket?.cancel()
+        failAwaited("relay is not connected")
         pending.clear()
         responseTimer = fixedRateTimer("command-timeout", daemon = true, initialDelay = 1_000, period = 1_000) {
             if (generation == connectionGeneration) {
@@ -162,7 +168,7 @@ class RemoteClient(
                         "response" -> {
                             val requestId = payload.getString("requestId")
                             val command = pending.remove(requestId) ?: return@runCatching
-                            listener.onResponse(command, payload)
+                            deliverResponse(requestId, command, payload)
                         }
                         else -> listener.onEvent(envelope.kind, payload)
                     }
@@ -172,6 +178,7 @@ class RemoteClient(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (generation != connectionGeneration) return
                 responseTimer?.cancel()
+                failAwaited("relay is not connected")
                 pending.clear()
                 listener.onConnection(ConnectionStatus.ERROR, t.message ?: "Connection failed")
                 scheduleReconnect(generation)
@@ -180,6 +187,7 @@ class RemoteClient(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (generation != connectionGeneration) return
                 responseTimer?.cancel()
+                failAwaited("relay is not connected")
                 pending.clear()
                 listener.onConnection(ConnectionStatus.DISCONNECTED, reason)
                 if (code != 1000) scheduleReconnect(generation)
@@ -193,6 +201,7 @@ class RemoteClient(
         connectionGeneration += 1
         reconnectTimer?.cancel()
         responseTimer?.cancel()
+        failAwaited("relay is not connected")
         pending.clear()
         socket?.close(1000, "client closed")
         pairingTimer?.cancel()
@@ -212,6 +221,26 @@ class RemoteClient(
 
     fun command(action: String, data: JSONObject = JSONObject()): String {
         val requestId = UUID.randomUUID().toString()
+        dispatch(requestId, action, data)
+        return requestId
+    }
+
+    suspend fun request(action: String, data: JSONObject = JSONObject()): JSONObject {
+        val requestId = UUID.randomUUID().toString()
+        val response = CompletableDeferred<JSONObject>()
+        awaited[requestId] = response
+        try {
+            dispatch(requestId, action, data)
+            val payload = withTimeout(RemoteCommand(action, "{}").responseTimeoutMs + 1_000) { response.await() }
+            if (!payload.optBoolean("ok")) throw IOException(payload.optString("error", "Request failed"))
+            return payload.optJSONObject("data") ?: JSONObject()
+        } finally {
+            awaited.remove(requestId)
+            pending.remove(requestId)
+        }
+    }
+
+    private fun dispatch(requestId: String, action: String, data: JSONObject) {
         val command = RemoteCommand.capture(action, data)
         pending.add(requestId, command, System.nanoTime() / 1_000_000)
         val sent = sendEnvelope(
@@ -219,13 +248,22 @@ class RemoteClient(
             JSONObject().put("requestId", requestId).put("action", action).put("data", data),
         )
         if (!sent) pending.remove(requestId)?.let { failCommand(requestId, it, "relay is not connected") }
-        return requestId
     }
 
     private fun failCommand(requestId: String, command: RemoteCommand, message: String) {
-        listener.onResponse(command, JSONObject().put("requestId", requestId).put("ok", false).put("error", message))
+        deliverResponse(requestId, command, JSONObject().put("requestId", requestId).put("ok", false).put("error", message))
     }
 
+    private fun deliverResponse(requestId: String, command: RemoteCommand, payload: JSONObject) {
+        val response = awaited.remove(requestId)
+        if (response != null) response.complete(payload) else listener.onResponse(command, payload)
+    }
+
+    private fun failAwaited(message: String) {
+        awaited.keys.toList().forEach { id -> awaited.remove(id)?.completeExceptionally(IOException(message)) }
+    }
+
+    @Synchronized
     private fun sendEnvelope(kind: String, payload: JSONObject): Boolean {
         val current = config ?: return false
         return socket?.send(codec.sign(current.hostId, kind, payload).toJson().toString()) == true
