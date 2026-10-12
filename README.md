@@ -102,13 +102,15 @@ Device revocation and project changes take effect on the next phone message with
 
 ## Image attachments
 
-Update both the Android app and Windows Agent to `0.1.8`. The existing Relay container can continue running.
+Update both the Android app and Windows Agent to `0.1.9`. The existing Relay container can continue running.
 
 In a loaded conversation, use the image button beside the message field to choose JPEG or PNG pictures. A message can contain up to four images, with or without text. Selected images have previews and a remove button. Large images are resized to a maximum edge of 2560 pixels; each processed image must be at most 8 MiB.
 
 The phone uploads one acknowledged 192 KiB chunk at a time. Failed uploads retain the draft and resume from the last confirmed offset when retried. The Agent verifies the completed image's size, SHA-256, format, and dimensions, then submits its absolute path as a Codex `localImage` input. Images are preserved when a message is queued or sent with Steer.
 
 Completed images and 512-pixel previews are stored under `%LOCALAPPDATA%\CodexRemote\images` on Windows, separate from project files. History includes attachment identifiers, so the phone can retrieve previews after reopening a session. Images remain on disk while that history references them. This version does not automatically delete completed images or provide full-resolution downloads to the phone. Images use the same transport as messages, including its existing plaintext limitation.
+
+Large history responses and events are split into signed 192 KiB chunks and reassembled by the phone, preserving the Relay's 2 MiB per-message limit. Transfers are checked against their total size and SHA-256 and are limited to 32 MiB per payload. The conversation shows loading progress and offers reload/reconnect actions on failure. Image selection is available while history loads; sending becomes available after the session loads successfully.
 
 ## Protocol
 

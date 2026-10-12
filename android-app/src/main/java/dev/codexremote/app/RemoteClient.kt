@@ -69,6 +69,7 @@ class RemoteClient(
         .retryOnConnectionFailure(true)
         .build()
     private val pending = PendingCommands()
+    private val transfers = IncomingTransfers()
     private val awaited = ConcurrentHashMap<String, CompletableDeferred<JSONObject>>()
     private var socket: WebSocket? = null
     private var pairingTimer: Timer? = null
@@ -107,6 +108,7 @@ class RemoteClient(
         socket?.cancel()
         failAwaited("relay is not connected")
         pending.clear()
+        transfers.clear()
         responseTimer = fixedRateTimer("command-timeout", daemon = true, initialDelay = 1_000, period = 1_000) {
             if (generation == connectionGeneration) {
                 pending.expire(System.nanoTime() / 1_000_000).forEach { (requestId, command) ->
@@ -145,7 +147,21 @@ class RemoteClient(
                     require(envelope.targetId == identity.clientId || envelope.targetId == "*")
                     codec.verify(envelope, parsePublicKey(current.hostPublicKey))
                     val payload = envelope.decodedPayload()
-                    when (envelope.kind) {
+                    if (envelope.kind == "transfer.chunk") {
+                        val requestId = payload.optString("requestId")
+                        pending.touch(requestId, System.nanoTime() / 1_000_000)
+                        listener.onEvent("transfer.progress", JSONObject().put("requestId", requestId)
+                            .put("percent", (payload.getInt("index") + 1) * 100 / payload.getInt("total")))
+                        transfers.accept(payload)?.let { handlePayload(it.kind, it.payload) }
+                    } else handlePayload(envelope.kind, payload)
+                }.onFailure {
+                    transfers.clear()
+                    listener.onConnection(ConnectionStatus.ERROR, it.message ?: "Invalid server message")
+                }
+            }
+
+            private fun handlePayload(kind: String, payload: JSONObject) {
+                    when (kind) {
                         "pair.accepted" -> {
                             pairingTimer?.cancel()
                             paired = true
@@ -153,7 +169,7 @@ class RemoteClient(
                             listener.onPaired()
                         }
                         "pair.pending" -> {
-                            listener.onEvent(envelope.kind, payload)
+                            listener.onEvent(kind, payload)
                             pairingTimer?.cancel()
                             pairingTimer = fixedRateTimer("pair-retry", daemon = true, initialDelay = 2_000, period = 2_000) {
                                 sendEnvelope(
@@ -167,12 +183,11 @@ class RemoteClient(
                         }
                         "response" -> {
                             val requestId = payload.getString("requestId")
-                            val command = pending.remove(requestId) ?: return@runCatching
+                            val command = pending.remove(requestId) ?: return
                             deliverResponse(requestId, command, payload)
                         }
-                        else -> listener.onEvent(envelope.kind, payload)
+                        else -> listener.onEvent(kind, payload)
                     }
-                }.onFailure { listener.onConnection(ConnectionStatus.ERROR, it.message ?: "Invalid server message") }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -180,6 +195,7 @@ class RemoteClient(
                 responseTimer?.cancel()
                 failAwaited("relay is not connected")
                 pending.clear()
+                transfers.clear()
                 listener.onConnection(ConnectionStatus.ERROR, t.message ?: "Connection failed")
                 scheduleReconnect(generation)
             }
@@ -189,6 +205,7 @@ class RemoteClient(
                 responseTimer?.cancel()
                 failAwaited("relay is not connected")
                 pending.clear()
+                transfers.clear()
                 listener.onConnection(ConnectionStatus.DISCONNECTED, reason)
                 if (code != 1000) scheduleReconnect(generation)
             }
@@ -203,6 +220,7 @@ class RemoteClient(
         responseTimer?.cancel()
         failAwaited("relay is not connected")
         pending.clear()
+        transfers.clear()
         socket?.close(1000, "client closed")
         pairingTimer?.cancel()
         socket = null

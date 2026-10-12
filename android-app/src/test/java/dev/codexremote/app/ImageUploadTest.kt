@@ -2,6 +2,7 @@ package dev.codexremote.app
 
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
+import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -10,6 +11,18 @@ import java.io.IOException
 import java.util.Base64
 
 class ImageUploadTest {
+    @Test
+    fun reopenedHistoryPreservesImageIdentityAndSeparatesText() {
+        val item = JSONObject().put("id", "message-1").put("content", JSONArray()
+            .put(JSONObject().put("type", "text").put("text", "look at this"))
+            .put(JSONObject().put("type", "localImage").put("path", "D:/images/image-1.png").put("attachmentId", "image-1").put("name", "phone.png")))
+
+        val message = parseUserMessage(item)
+
+        assertEquals("look at this", message.text)
+        assertEquals(listOf(MessageImage("image-1", "phone.png")), message.images)
+    }
+
     @Test
     fun resumesInterruptedImageAndFinishesOnlyAfterAllChunks() = runBlocking {
         val file = File.createTempFile("image-upload", ".png")

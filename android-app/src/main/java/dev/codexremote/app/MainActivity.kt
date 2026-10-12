@@ -382,7 +382,7 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
                     ) {
                         IconButton(
                             onClick = { imagePicker.launch(PickVisualMediaRequest(PickVisualMedia.ImageOnly)) },
-                            enabled = state.threadLoaded && !state.sending && !state.preparingImages && state.draftImages.size < MAX_MESSAGE_IMAGES,
+                            enabled = !state.sending && !state.preparingImages && state.draftImages.size < MAX_MESSAGE_IMAGES,
                         ) { Icon(Icons.Default.Image, "添加图片") }
                     }
                     OutlinedTextField(
@@ -421,6 +421,22 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
                 if (state.activeTurnId != null) item { Text("Codex is working...", color = Moss, style = MaterialTheme.typography.labelMedium) }
             }
             ConversationScrollbar(listState, Modifier.align(Alignment.CenterEnd))
+            if (!state.threadLoaded && state.messages.isEmpty()) {
+                Column(Modifier.align(Alignment.Center).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    if (state.loadingThread) {
+                        CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                        Text(
+                            if (state.threadLoadProgress > 0) "正在加载会话 · ${state.threadLoadProgress}%" else "正在加载会话…",
+                            modifier = Modifier.padding(top = 12.dp),
+                            color = Muted,
+                        )
+                    } else {
+                        Text("会话尚未加载，连接成功后即可发送消息。", color = Muted)
+                        TextButton(onClick = model::reloadThread) { Text("重新加载会话") }
+                        TextButton(onClick = model::reconnect) { Text("重新连接") }
+                    }
+                }
+            }
             if (showJumpToLatest) {
                 SmallFloatingActionButton(
                     onClick = {

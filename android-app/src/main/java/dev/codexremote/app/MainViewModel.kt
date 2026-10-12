@@ -40,6 +40,8 @@ data class UiState(
     val error: UserFacingError? = null,
     val retryCommand: RemoteCommand? = null,
     val threadLoaded: Boolean = false,
+    val loadingThread: Boolean = false,
+    val threadLoadProgress: Int = 0,
     val closingSession: Boolean = false,
     val draftText: String = "",
     val draftImages: List<DraftImage> = emptyList(),
@@ -75,6 +77,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     fun dismissError() = update { it.copy(error = null, retryCommand = null) }
     fun loadProjects() = remote.command("projects.list")
     fun loadThreads() = remote.command("threads.list")
+    fun reloadThread() {
+        val thread = state.value.selectedThread ?: return
+        update { it.copy(loadingThread = true, threadLoadProgress = 0, error = null, retryCommand = null) }
+        remote.command("thread.resume", JSONObject().put("threadId", thread.id))
+    }
     fun updateDraft(text: String) = update { it.copy(draftText = text) }
 
     fun addImages(uris: List<Uri>) {
@@ -151,6 +158,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                 error = null,
                 retryCommand = null,
                 threadLoaded = false,
+                loadingThread = true,
+                threadLoadProgress = 0,
                 draftText = "",
                 draftImages = emptyList(),
                 sending = false,
@@ -168,6 +177,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
             return
         }
         update { it.copy(error = null, retryCommand = null) }
+        if (command.action == "thread.resume") {
+            update { it.copy(loadingThread = true, threadLoadProgress = 0) }
+        }
         remote.command(command.action, command.data())
     }
 
@@ -182,6 +194,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                 error = null,
                 retryCommand = null,
                 threadLoaded = false,
+                loadingThread = false,
+                threadLoadProgress = 0,
                 closingSession = false,
                 draftText = "",
                 draftImages = emptyList(),
@@ -268,12 +282,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                 error = if (disconnected) UserFacingError.connectionUnavailable() else it.error,
                 closingSession = if (disconnected) false else it.closingSession,
                 threadLoaded = if (disconnected) false else it.threadLoaded,
+                loadingThread = if (disconnected) false else it.loadingThread,
             )
         }
         if (status == RemoteClient.ConnectionStatus.CONNECTED && remote.paired) {
             refresh()
-            state.value.selectedThread?.let {
-                remote.command("thread.resume", JSONObject().put("threadId", it.id))
+            if (state.value.selectedThread != null) {
+                update { it.copy(loadingThread = true, threadLoadProgress = 0) }
+                remote.command("thread.resume", JSONObject().put("threadId", state.value.selectedThread?.id))
             }
         }
     }
@@ -293,6 +309,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                     retryCommand = command.takeIf { it.retryable && !error.reconnectRequired },
                     closingSession = if (action == "session.close") false else it.closingSession,
                     threadLoaded = if (error.reconnectRequired) false else it.threadLoaded,
+                    loadingThread = if (action == "thread.resume" || error.reconnectRequired) false else it.loadingThread,
                 )
             }
             return
@@ -326,6 +343,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                         error = null,
                         retryCommand = null,
                         threadLoaded = true,
+                        loadingThread = false,
+                        threadLoadProgress = 100,
                     )
                 }
             }
@@ -339,6 +358,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                         error = null,
                         retryCommand = null,
                         threadLoaded = false,
+                        loadingThread = false,
                         closingSession = false,
                         draftText = "",
                         draftImages = emptyList(),
@@ -358,12 +378,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
 
     override fun onEvent(kind: String, payload: JSONObject) {
         when (kind) {
+            "transfer.progress" -> update {
+                if (it.loadingThread) it.copy(threadLoadProgress = payload.optInt("percent")) else it
+            }
             "pair.pending" -> update { it.copy(pairingCode = payload.optString("verificationCode")) }
             "codex.event" -> handleCodexEvent(payload)
             "codex.request" -> handleApproval(payload)
             "host.status" -> if (payload.optBoolean("online")) {
                 refresh()
                 state.value.selectedThread?.takeIf { !state.value.threadLoaded }?.let {
+                    update { current -> current.copy(loadingThread = true, threadLoadProgress = 0) }
                     remote.command("thread.resume", JSONObject().put("threadId", it.id))
                 }
             }

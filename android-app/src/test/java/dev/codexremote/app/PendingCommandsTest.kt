@@ -7,6 +7,14 @@ import org.junit.Test
 
 class PendingCommandsTest {
     @Test
+    fun receivingHistoryChunkExtendsRequestDeadline() {
+        val pending = PendingCommands()
+        pending.add("resume", RemoteCommand("thread.resume", "{}"), nowMs = 0)
+        pending.touch("resume", nowMs = 60_000)
+        assertTrue(pending.expire(65_000).isEmpty())
+        assertEquals(1, pending.expire(125_000).size)
+    }
+    @Test
     fun unansweredRefreshExpiresOnceAfterFifteenSeconds() {
         val pending = PendingCommands()
         val command = RemoteCommand("threads.list", "{}")

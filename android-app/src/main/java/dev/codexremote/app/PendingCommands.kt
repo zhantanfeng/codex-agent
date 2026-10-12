@@ -13,6 +13,11 @@ internal class PendingCommands {
     fun remove(requestId: String): RemoteCommand? = requests.remove(requestId)?.command
 
     @Synchronized
+    fun touch(requestId: String, nowMs: Long) {
+        requests[requestId]?.let { requests[requestId] = it.copy(deadlineMs = nowMs + it.command.responseTimeoutMs) }
+    }
+
+    @Synchronized
     fun expire(nowMs: Long): List<Pair<String, RemoteCommand>> {
         val expired = requests.filterValues { it.deadlineMs <= nowMs }
         expired.keys.forEach { requests.remove(it) }

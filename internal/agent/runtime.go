@@ -206,7 +206,12 @@ func (r *Runtime) handleCommand(clientID string, command commandPayload) {
 	if err != nil {
 		response.Error = err.Error()
 	}
-	_ = r.send(clientID, "response", response)
+	if err := r.send(clientID, "response", response); err != nil {
+		r.log.Warn("send phone response", "action", command.Action, "error", err)
+		if ctx.Err() == nil {
+			_ = r.send(clientID, "response", responsePayload{RequestID: command.RequestID, OK: false, Error: "会话数据传输失败，请点击重试或重新连接。"})
+		}
+	}
 }
 
 func (r *Runtime) handlePairing(env protocol.Envelope) {
@@ -659,11 +664,7 @@ func (r *Runtime) broadcast(kind string, payload any) error {
 func (r *Runtime) sendOn(conn *websocket.Conn, target, kind string, payload any) error {
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()
-	env, err := r.signer.Sign(target, kind, payload)
-	if err != nil {
-		return err
-	}
-	return conn.WriteJSON(env)
+	return r.sendPayload(conn, target, kind, payload)
 }
 
 func (r *Runtime) threadAllowed(id string) bool {
