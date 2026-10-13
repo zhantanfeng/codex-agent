@@ -20,12 +20,15 @@ import kotlin.concurrent.fixedRateTimer
 import kotlin.concurrent.schedule
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 data class PairingConfig(
     val relayUrl: String,
     val hostId: String,
     val hostPublicKey: String,
     val code: String,
+    val direct: Boolean = false,
 )
 
 data class RemoteCommand(
@@ -57,6 +60,7 @@ class RemoteClient(
         fun onPaired()
         fun onResponse(command: RemoteCommand, payload: JSONObject)
         fun onEvent(kind: String, payload: JSONObject)
+        fun onPairingError(message: String)
     }
 
     enum class ConnectionStatus { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
@@ -73,6 +77,7 @@ class RemoteClient(
     private val awaited = ConcurrentHashMap<String, CompletableDeferred<JSONObject>>()
     private var socket: WebSocket? = null
     private var pairingTimer: Timer? = null
+    private var pairingTimeout: Timer? = null
     private var reconnectTimer: Timer? = null
     private var responseTimer: Timer? = null
     private var reconnectDelayMs = 1_000L
@@ -84,8 +89,21 @@ class RemoteClient(
 
     fun configured(): Boolean = config != null
 
+    val relayUrl: String get() = config?.relayUrl ?: BuildConfig.DEFAULT_RELAY_URL
+
+    suspend fun configureWithCode(code: String, relayUrl: String) {
+        val parsed = withContext(Dispatchers.IO) {
+            resolveLinkCode(http.newBuilder().callTimeout(10, TimeUnit.SECONDS).build(), relayUrl, code)
+        }
+        configure(parsed)
+    }
+
     fun configure(raw: String) {
         val parsed = parsePairing(raw)
+        configure(parsed)
+    }
+
+    private fun configure(parsed: PairingConfig) {
         config = parsed
         paired = false
         prefs.edit()
@@ -94,6 +112,7 @@ class RemoteClient(
             .putString("host_public", parsed.hostPublicKey)
             .putString("pair_code", parsed.code)
             .putBoolean("paired", false)
+            .putBoolean("pairing_direct", parsed.direct)
             .apply()
     }
 
@@ -103,6 +122,8 @@ class RemoteClient(
         shouldReconnect = true
         reconnectTimer?.cancel()
         responseTimer?.cancel()
+        pairingTimer?.cancel()
+        pairingTimeout?.cancel()
         connectionGeneration += 1
         val generation = connectionGeneration
         socket?.cancel()
@@ -135,6 +156,16 @@ class RemoteClient(
                             .put("clientId", identity.clientId)
                             .put("publicKey", b64(identity.keyPair.public.encoded)),
                     )
+                    if (current.direct) {
+                        pairingTimeout = Timer("link-pairing-timeout", true).apply {
+                            schedule(30_000) {
+                                if (generation == connectionGeneration && !paired) {
+                                    disconnect()
+                                    listener.onPairingError("连接码配对未完成，可能已被使用或电脑已离线，请重新输入电脑端显示的连接码")
+                                }
+                            }
+                        }
+                    }
                 }
                 listener.onConnection(ConnectionStatus.CONNECTED)
             }
@@ -164,6 +195,7 @@ class RemoteClient(
                     when (kind) {
                         "pair.accepted" -> {
                             pairingTimer?.cancel()
+                            pairingTimeout?.cancel()
                             paired = true
                             prefs.edit().putBoolean("paired", true).remove("pair_code").apply()
                             listener.onPaired()
@@ -223,6 +255,7 @@ class RemoteClient(
         transfers.clear()
         socket?.close(1000, "client closed")
         pairingTimer?.cancel()
+        pairingTimeout?.cancel()
         socket = null
     }
 
@@ -294,6 +327,7 @@ class RemoteClient(
             hostId = prefs.getString("host_id", null) ?: return null,
             hostPublicKey = prefs.getString("host_public", null) ?: return null,
             code = prefs.getString("pair_code", "") ?: "",
+            direct = prefs.getBoolean("pairing_direct", false),
         )
     }
 

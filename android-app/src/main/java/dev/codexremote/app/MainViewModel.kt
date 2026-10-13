@@ -36,10 +36,12 @@ data class UiState(
     val activeTurnId: String? = null,
     val approval: ApprovalUi? = null,
     val pairingCode: String? = null,
+    val pairingBusy: Boolean = false,
     val lastEventId: Long = 0,
     val error: UserFacingError? = null,
     val retryCommand: RemoteCommand? = null,
     val threadLoaded: Boolean = false,
+    val threadReadOnly: Boolean = false,
     val loadingThread: Boolean = false,
     val threadLoadProgress: Int = 0,
     val closingSession: Boolean = false,
@@ -66,11 +68,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     }
 
     fun configure(raw: String) {
+        if (state.value.pairingBusy) return
         runCatching {
             remote.configure(raw)
             update { it.copy(setupRequired = false, paired = false, error = null) }
             remote.connect()
         }.onFailure { update { current -> current.copy(error = UserFacingError.fromMessage(it.message ?: "Pairing failed")) } }
+    }
+
+    val pairingRelayUrl: String get() = remote.relayUrl
+
+    fun connectWithCode(code: String, relayUrl: String) {
+        if (state.value.pairingBusy) return
+        update { it.copy(pairingBusy = true, pairingCode = null, error = null) }
+        viewModelScope.launch {
+            try {
+                remote.configureWithCode(code, relayUrl)
+                update { it.copy(setupRequired = false, paired = false) }
+                remote.connect()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                update { it.copy(pairingBusy = false, error = UserFacingError(error.message ?: "连接失败，请重试")) }
+            }
+        }
+    }
+
+    fun showPairing() {
+        remote.disconnect()
+        update { UiState(setupRequired = true) }
+    }
+
+    override fun onPairingError(message: String) {
+        update { it.copy(pairingBusy = false, pairingCode = null, connection = RemoteClient.ConnectionStatus.ERROR, error = UserFacingError(message)) }
     }
 
     fun reconnect() = remote.connect()
@@ -82,11 +112,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
         update { it.copy(loadingThread = true, threadLoadProgress = 0, error = null, retryCommand = null) }
         remote.command("thread.resume", JSONObject().put("threadId", thread.id))
     }
-    fun updateDraft(text: String) = update { it.copy(draftText = text) }
+    fun updateDraft(text: String) = update { if (it.threadReadOnly) it else it.copy(draftText = text) }
 
     fun addImages(uris: List<Uri>) {
         val threadId = state.value.selectedThread?.id ?: return
-        if (uris.isEmpty() || sendJob?.isActive == true || preparationJob?.isActive == true) return
+        if (uris.isEmpty() || state.value.threadReadOnly || sendJob?.isActive == true || preparationJob?.isActive == true) return
         val available = MAX_MESSAGE_IMAGES - state.value.draftImages.size
         if (available <= 0) {
             update { it.copy(error = UserFacingError("每条消息最多添加 4 张图片")) }
@@ -158,6 +188,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                 error = null,
                 retryCommand = null,
                 threadLoaded = false,
+                threadReadOnly = false,
                 loadingThread = true,
                 threadLoadProgress = 0,
                 draftText = "",
@@ -194,6 +225,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                 error = null,
                 retryCommand = null,
                 threadLoaded = false,
+                threadReadOnly = false,
                 loadingThread = false,
                 threadLoadProgress = 0,
                 closingSession = false,
@@ -208,7 +240,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
 
     fun closePhoneSession() {
         val thread = state.value.selectedThread ?: return
-        if (!state.value.threadLoaded || state.value.activeTurnId != null || state.value.closingSession || state.value.sending) return
+        if (!state.value.canWriteThread || state.value.activeTurnId != null || state.value.closingSession || state.value.sending) return
         update { it.copy(closingSession = true, error = null, retryCommand = null) }
         remote.command("session.close", JSONObject().put("threadId", thread.id))
     }
@@ -218,7 +250,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
         val thread = snapshot.selectedThread ?: return
         val trimmed = text.trim()
         val images = snapshot.draftImages
-        if ((trimmed.isEmpty() && images.isEmpty()) || !snapshot.threadLoaded || sendJob?.isActive == true || preparationJob?.isActive == true) return
+        if ((trimmed.isEmpty() && images.isEmpty()) || !snapshot.canWriteThread || sendJob?.isActive == true || preparationJob?.isActive == true) return
         val localId = "local-${UUID.randomUUID()}"
         sendJob = viewModelScope.launch {
             update { it.copy(sending = true, error = null, retryCommand = null) }
@@ -262,12 +294,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     }
 
     fun interrupt() {
+        if (!state.value.canWriteThread) return
         val threadId = state.value.selectedThread?.id ?: return
         val turnId = state.value.activeTurnId ?: return
         remote.command("turn.interrupt", JSONObject().put("threadId", threadId).put("turnId", turnId))
     }
 
     fun approve(decision: String) {
+        if (!state.value.canWriteThread) return
         val approval = state.value.approval ?: return
         remote.command("approval.respond", JSONObject().put("requestId", approval.requestId).put("decision", decision))
         update { it.copy(approval = null) }
@@ -279,6 +313,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
             it.copy(
                 connection = status,
                 connectionDetail = detail,
+                pairingBusy = if (disconnected) false else it.pairingBusy,
                 error = if (disconnected) UserFacingError.connectionUnavailable() else it.error,
                 closingSession = if (disconnected) false else it.closingSession,
                 threadLoaded = if (disconnected) false else it.threadLoaded,
@@ -295,7 +330,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     }
 
     override fun onPaired() {
-        update { it.copy(paired = true, pairingCode = null, error = null) }
+        update { it.copy(paired = true, pairingCode = null, pairingBusy = false, error = null) }
         refresh()
     }
 
@@ -333,20 +368,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
             }
             "thread.start", "thread.resume" -> {
                 val root = data as? JSONObject ?: return
-                val threadJson = root.optJSONObject("thread") ?: return
-                val thread = parseThread(threadJson)
-                val history = parseHistory(threadJson.optJSONArray("turns"))
-                update {
-                    if (action == "thread.resume" && it.selectedThread?.id != thread.id) it else it.copy(
-                        selectedThread = thread,
-                        messages = history,
-                        error = null,
-                        retryCommand = null,
-                        threadLoaded = true,
-                        loadingThread = false,
-                        threadLoadProgress = 100,
-                    )
-                }
+                update { applyThreadResponse(it, action, root) }
             }
             "session.close" -> {
                 update {
@@ -358,6 +380,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                         error = null,
                         retryCommand = null,
                         threadLoaded = false,
+                        threadReadOnly = false,
                         loadingThread = false,
                         closingSession = false,
                         draftText = "",
@@ -439,6 +462,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
 
     private fun handleApproval(payload: JSONObject) {
         val params = payload.optJSONObject("params") ?: JSONObject()
+        if (state.value.threadReadOnly ||
+            (params.optString("threadId").isNotBlank() && params.optString("threadId") != state.value.selectedThread?.id)
+        ) return
         val method = payload.optString("method")
         val title = if (method.contains("fileChange") || method.contains("Patch")) "Approve file changes" else "Approve command"
         val detail = params.optString("command", params.optString("reason", method))
@@ -472,36 +498,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
         val value = MessageUi(id, role, text, detail)
         if (index >= 0) messages[index] = value else messages += value
         update { it.copy(messages = messages) }
-    }
-
-    private fun parseThread(value: JSONObject): ThreadUi {
-        val status = value.optJSONObject("status")?.optString("type") ?: "unknown"
-        return ThreadUi(
-            id = value.getString("id"),
-            title = value.optString("name").ifBlank { value.optString("preview", "Untitled session") }.ifBlank { "Untitled session" },
-            cwd = value.optString("cwd"),
-            status = status,
-            updatedAt = value.optLong("updatedAt"),
-        )
-    }
-
-    private fun parseHistory(turns: JSONArray?): List<MessageUi> {
-        if (turns == null) return emptyList()
-        val result = mutableListOf<MessageUi>()
-        for (turnIndex in 0 until turns.length()) {
-            val items = turns.getJSONObject(turnIndex).optJSONArray("items") ?: continue
-            for (itemIndex in 0 until items.length()) {
-                val item = items.getJSONObject(itemIndex)
-                when (item.optString("type")) {
-                    "userMessage" -> {
-                        result += parseUserMessage(item)
-                    }
-                    "agentMessage" -> result += MessageUi(item.optString("id"), "assistant", item.optString("text"))
-                    "commandExecution" -> result += MessageUi(item.optString("id"), "command", item.optString("aggregatedOutput"), item.optString("command"))
-                }
-            }
-        }
-        return result
     }
 
     private fun update(block: (UiState) -> UiState) {

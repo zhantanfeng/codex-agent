@@ -20,29 +20,30 @@ import (
 )
 
 type Runtime struct {
-	store       *Store
-	configMu    sync.RWMutex
-	config      *Config
-	private     ed25519.PrivateKey
-	signer      *protocol.Signer
-	guard       *protocol.ReplayGuard
-	log         *slog.Logger
-	runCtx      context.Context
-	commandMu   sync.Mutex
-	codexMu     sync.RWMutex
-	codex       *CodexClient
-	connMu      sync.Mutex
-	conn        *websocket.Conn
-	writeMu     sync.Mutex
-	eventMu     sync.Mutex
-	events      []eventPayload
-	nextEventID atomic.Uint64
-	approvalMu  sync.Mutex
-	approvals   map[string]CodexMessage
-	threadMu    sync.Mutex
-	threads     map[string]bool
-	activeTurns map[string]string
-	queues      map[string][]queuedTurn
+	store           *Store
+	configMu        sync.RWMutex
+	config          *Config
+	private         ed25519.PrivateKey
+	signer          *protocol.Signer
+	guard           *protocol.ReplayGuard
+	log             *slog.Logger
+	runCtx          context.Context
+	commandMu       sync.Mutex
+	codexMu         sync.RWMutex
+	codex           *CodexClient
+	connMu          sync.Mutex
+	conn            *websocket.Conn
+	writeMu         sync.Mutex
+	eventMu         sync.Mutex
+	events          []eventPayload
+	nextEventID     atomic.Uint64
+	approvalMu      sync.Mutex
+	approvals       map[string]CodexMessage
+	threadMu        sync.Mutex
+	threads         map[string]bool
+	readOnlyThreads map[string]bool
+	activeTurns     map[string]string
+	queues          map[string][]queuedTurn
 }
 
 type queuedTurn struct {
@@ -105,6 +106,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 	r.codex = codex
 	r.codexMu.Unlock()
 	defer r.closeCodex()
+	if err := r.prepareLinkPairing(); err != nil {
+		return err
+	}
 	backoff := time.Second
 	for ctx.Err() == nil {
 		if err := r.connect(ctx); err != nil && ctx.Err() == nil {
@@ -153,6 +157,11 @@ func (r *Runtime) connect(ctx context.Context) error {
 	}()
 	if err := r.sendOn(conn, "*", "hello", map[string]string{"publicKey": r.signer.PublicKeyBase64()}); err != nil {
 		return err
+	}
+	if r.store != nil {
+		if err := r.registerLinkPairing(ctx); err != nil && ctx.Err() == nil {
+			r.log.Warn("connection code unavailable", "error", err)
+		}
 	}
 	_ = r.broadcast("host.status", map[string]any{"online": true, "hostId": config.HostID})
 	for {
@@ -240,6 +249,19 @@ func (r *Runtime) handlePairing(env protocol.Envelope) {
 	if latest.Pairing == nil || time.Now().After(latest.Pairing.ExpiresAt) || request.Code != latest.Pairing.Code {
 		return
 	}
+	if latest.Pairing.AutoApprove {
+		latest.Clients[request.ClientID] = request.PublicKey
+		latest.Pairing = nil
+		latest.Pending = map[string]PendingClient{}
+		if err := r.store.Save(latest); err != nil {
+			return
+		}
+		r.setConfig(latest)
+		_ = r.send(request.ClientID, "pair.accepted", map[string]string{"hostId": latest.HostID, "publicKey": r.signer.PublicKeyBase64()})
+		_ = r.send("*", "pair.consumed", map[string]string{"token": request.Code})
+		r.log.Info("phone paired with connection code", "client", request.ClientID)
+		return
+	}
 	sas := pairingSAS(r.signer.PublicKeyBase64(), request.ClientID, request.PublicKey, request.Code)
 	latest.Pending[request.ClientID] = PendingClient{PublicKey: request.PublicKey, SAS: sas, ExpiresAt: latest.Pairing.ExpiresAt}
 	if err := r.store.Save(latest); err != nil {
@@ -307,14 +329,16 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 		if !r.threadAllowed(data.ThreadID) {
 			return nil, errors.New("thread is not in an allowed project")
 		}
-		var result map[string]any
-		if err := r.callCodex(ctx, "thread/resume", map[string]any{"threadId": data.ThreadID, "excludeTurns": false}, &result); err != nil {
+		result, err := resumeOrReadThread(ctx, data.ThreadID, r.callCodex)
+		if err != nil {
 			return nil, err
 		}
 		if !r.resultInAllowlist(result) {
 			return nil, errors.New("thread working directory is not in the allowlist")
 		}
 		r.markThreadResult(result)
+		readOnly, _ := result["readOnly"].(bool)
+		r.setThreadReadOnly(data.ThreadID, readOnly)
 		r.annotateThreadImages(result)
 		return result, nil
 	case "session.close":
@@ -324,8 +348,8 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 		if err := json.Unmarshal(command.Data, &data); err != nil {
 			return nil, err
 		}
-		if !r.threadAllowed(data.ThreadID) {
-			return nil, errors.New("thread is not in an allowed project")
+		if err := r.requireWritableThread(data.ThreadID); err != nil {
+			return nil, err
 		}
 		r.threadMu.Lock()
 		active := r.activeTurns[data.ThreadID]
@@ -348,6 +372,9 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 		}
 		if !r.threadAllowed(data.ThreadID) || (strings.TrimSpace(data.Text) == "" && len(data.ImageIDs) == 0) {
 			return nil, errors.New("thread is not loaded from an allowed project or message is empty")
+		}
+		if err := r.requireWritableThread(data.ThreadID); err != nil {
+			return nil, err
 		}
 		images, err := r.imagePaths(data.ThreadID, command.clientID, data.ImageIDs)
 		if err != nil {
@@ -384,8 +411,8 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 		if err := json.Unmarshal(command.Data, &data); err != nil {
 			return nil, err
 		}
-		if !r.threadAllowed(data.ThreadID) {
-			return nil, errors.New("thread is not allowed")
+		if err := r.requireWritableThread(data.ThreadID); err != nil {
+			return nil, err
 		}
 		images, err := r.imagePaths(data.ThreadID, command.clientID, data.ImageIDs)
 		if err != nil {
@@ -399,8 +426,8 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 		if err := json.Unmarshal(command.Data, &data); err != nil {
 			return nil, err
 		}
-		if !r.threadAllowed(data.ThreadID) {
-			return nil, errors.New("thread is not allowed")
+		if err := r.requireWritableThread(data.ThreadID); err != nil {
+			return nil, err
 		}
 		var result map[string]any
 		err := r.callCodex(ctx, "turn/interrupt", map[string]any{"threadId": data.ThreadID, "turnId": data.TurnID}, &result)

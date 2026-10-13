@@ -63,7 +63,15 @@ bin\codex-remote.exe project add -id my-project -path D:\projects\my-project
 bin\codex-remote.exe run
 ```
 
-Keep `run` active during initial setup. In a second terminal, start pairing:
+With Relay, Agent, and Android `0.1.11` or newer, `run` automatically prints a six-digit connection code after connecting to the Relay. Open **dcode**, enter the code, and tap **连接电脑**. No separate `pair` command or Windows confirmation is required. The code expires after 10 minutes and is consumed by the first successfully paired phone. Restart `run` to generate a new code. Paired phones retain their authorization and reconnect without entering a code again.
+
+The app defaults to `ws://43.155.135.230:8080/ws`. For another Relay, use **服务器设置 / 扫码连接** to set the address. APK builders can set the default with `-PdcodeRelayUrl=wss://YOUR_RELAY/ws`. The Relay allocates codes across online Agents, rejects expired/offline registrations, and limits code lookup attempts to five per IP per minute and 60 globally per minute.
+
+To update an existing Relay, deploy the updated source and run `docker compose -f deploy/relay/docker-compose.yml up -d --build` from the repository root. The six-digit flow requires this Relay update; previously paired phones and QR pairing still work with the previous Relay.
+
+A Linux amd64 prebuilt deployment package can also be used; see [prebuilt update instructions](deploy/relay/PREBUILT-README.md). It updates the existing Compose Relay on port 8080 and does not require a Go build on the server.
+
+QR pairing is still available. Keep `run` active and start it in a second terminal:
 
 ```powershell
 bin\codex-remote.exe pair
@@ -96,13 +104,14 @@ Device revocation and project changes take effect on the next phone message with
 - The Agent inherits the existing Codex sandbox and approval policy.
 - Approval prompts are sent to the phone and resolved against the original app-server request ID.
 - A second message sent during an active turn is queued by the Agent. The **Steer** action explicitly redirects the active turn.
+- A session owned by another Codex client opens with readable history and disabled input. Retry after closing it in the other client to acquire write access. Refreshing a read-only session reads the latest persisted history without interrupting the writer.
 - The Agent buffers the latest 500 Codex events in memory. A reconnecting phone asks for events after its last event ID.
 - The Relay rejects invalid signatures, timestamps outside the allowed window, and duplicate/out-of-order sequence numbers.
 - Private keys are protected with Windows DPAPI and an Android Keystore AES key. Message bodies remain plaintext by design in this version.
 
 ## Image attachments
 
-Update both the Android app and Windows Agent to `0.1.9`. The existing Relay container can continue running.
+Update both the Android app and Windows Agent to `0.1.11`. Image transfers work with the existing Relay; the new six-digit pairing flow requires an updated Relay.
 
 In a loaded conversation, use the image button beside the message field to choose JPEG or PNG pictures. A message can contain up to four images, with or without text. Selected images have previews and a remove button. Large images are resized to a maximum edge of 2560 pixels; each processed image must be at most 8 MiB.
 

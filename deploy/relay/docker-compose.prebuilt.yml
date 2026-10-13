@@ -1,0 +1,12 @@
+services:
+  relay:
+    image: dcode-relay:0.1.11
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true

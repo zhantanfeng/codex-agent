@@ -31,8 +31,9 @@ type PendingClient struct {
 }
 
 type Pairing struct {
-	Code      string    `json:"code"`
-	ExpiresAt time.Time `json:"expiresAt"`
+	Code        string    `json:"code"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+	AutoApprove bool      `json:"autoApprove,omitempty"`
 }
 
 type Store struct {

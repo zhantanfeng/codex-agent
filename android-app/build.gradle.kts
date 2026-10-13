@@ -12,8 +12,11 @@ android {
         applicationId = "dev.codexremote.app"
         minSdk = 31
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.1.9"
+        versionCode = 12
+        versionName = "0.1.11"
+
+        val relayUrl = providers.gradleProperty("dcodeRelayUrl").getOrElse("ws://43.155.135.230:8080/ws")
+        buildConfigField("String", "DEFAULT_RELAY_URL", "\"${relayUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -12,6 +12,8 @@ import androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
@@ -103,6 +105,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -188,45 +191,83 @@ private fun PairingCodeDialog(code: String) {
 @Composable
 private fun SetupScreen(state: UiState, model: MainViewModel) {
     var pairing by remember { mutableStateOf("") }
+    var linkCode by remember { mutableStateOf("") }
+    var relayUrl by remember { mutableStateOf(model.pairingRelayUrl) }
+    var showAdvanced by remember { mutableStateOf(false) }
+    val busy = state.pairingBusy || state.connection == RemoteClient.ConnectionStatus.CONNECTING
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.let(model::configure)
     }
     Column(
-        modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(24.dp),
+        modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.Center,
     ) {
         Icon(Icons.Default.Computer, contentDescription = null, tint = Moss, modifier = Modifier.size(42.dp))
         Spacer(Modifier.height(18.dp))
-        Text("Codex Remote", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+        Text("dcode", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
         Text(
-            if (state.connection == RemoteClient.ConnectionStatus.CONNECTING) "Connecting to your Windows host" else "Pair this phone with the Windows Agent",
+            if (busy) "正在连接电脑…" else "在电脑运行 codex-remote run，然后输入显示的六位连接码。",
             color = Muted,
             modifier = Modifier.padding(top = 8.dp, bottom = 24.dp),
         )
-        Button(
-            onClick = {
-                scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt("Scan the code shown by codex-remote pair"))
-            },
-            modifier = Modifier.fillMaxWidth().height(50.dp),
-        ) {
-            Icon(Icons.Default.QrCodeScanner, contentDescription = null)
-            Spacer(Modifier.width(10.dp))
-            Text("Scan pairing code")
-        }
-        Text("or paste the pairing payload", color = Muted, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(vertical = 16.dp))
         OutlinedTextField(
-            value = pairing,
-            onValueChange = { pairing = it },
+            value = linkCode,
+            onValueChange = { linkCode = it.filter { char -> char in '0'..'9' }.take(6) },
+            enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
-            minLines = 3,
-            label = { Text("Pairing payload") },
+            singleLine = true,
+            label = { Text("六位连接码") },
+            placeholder = { Text("000000") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Go),
+            keyboardActions = KeyboardActions(onGo = { if (!busy && isLinkCode(linkCode)) model.connectWithCode(linkCode, relayUrl) }),
         )
-        OutlinedButton(
-            onClick = { model.configure(pairing) },
-            enabled = pairing.isNotBlank(),
-            modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-        ) { Text("Pair manually") }
-        if (state.connection == RemoteClient.ConnectionStatus.CONNECTING) {
+        Button(
+            onClick = { model.connectWithCode(linkCode, relayUrl) },
+            enabled = !busy && isLinkCode(linkCode) && relayUrl.isNotBlank(),
+            modifier = Modifier.fillMaxWidth().padding(top = 12.dp).height(50.dp),
+        ) { Text(if (busy) "正在连接…" else "连接电脑") }
+        Text("连接码有效期 10 分钟，成功配对后自动保存授权。", color = Muted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
+        TextButton(onClick = { showAdvanced = !showAdvanced }, enabled = !busy) {
+            Text(if (showAdvanced) "收起其他连接方式" else "服务器设置 / 扫码连接")
+        }
+        if (showAdvanced) {
+            OutlinedTextField(
+                value = relayUrl,
+                onValueChange = { relayUrl = it },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("服务器地址") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+            )
+            Spacer(Modifier.height(16.dp))
+            OutlinedButton(
+                onClick = {
+                    scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt("Scan the code shown by codex-remote pair"))
+                },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth().height(50.dp),
+            ) {
+                Icon(Icons.Default.QrCodeScanner, contentDescription = null)
+                Spacer(Modifier.width(10.dp))
+                Text("扫码连接")
+            }
+            Text("或粘贴完整配对信息", color = Muted, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(vertical = 16.dp))
+            OutlinedTextField(
+                value = pairing,
+                onValueChange = { pairing = it },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 3,
+                enabled = !busy,
+                label = { Text("配对信息") },
+            )
+            OutlinedButton(
+                onClick = { model.configure(pairing) },
+                enabled = pairing.isNotBlank() && !busy,
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+            ) { Text("使用配对信息连接") }
+        }
+        if (busy) {
             CircularProgressIndicator(modifier = Modifier.size(24.dp).align(Alignment.CenterHorizontally).padding(top = 18.dp))
         }
     }
@@ -246,7 +287,10 @@ private fun HomeScreen(state: UiState, model: MainViewModel) {
                         ConnectionLabel(state.connection)
                     }
                 },
-                actions = { IconButton(onClick = model::reconnect) { Icon(Icons.Default.Refresh, "Reconnect") } },
+                actions = {
+                    IconButton(onClick = model::showPairing) { Icon(Icons.Default.Computer, "连接其他电脑") }
+                    IconButton(onClick = model::reconnect) { Icon(Icons.Default.Refresh, "Reconnect") }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Canvas),
             )
         },
@@ -310,7 +354,7 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
     val input = state.draftText
     val thread = state.selectedThread ?: return
     val imagePicker = rememberLauncherForActivityResult(PickMultipleVisualMedia(MAX_MESSAGE_IMAGES)) { model.addImages(it) }
-    val canSend = state.threadLoaded && !state.sending && !state.preparingImages && !state.closingSession &&
+    val canSend = state.canWriteThread && !state.sending && !state.preparingImages && !state.closingSession &&
         (input.isNotBlank() || state.draftImages.isNotEmpty())
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -330,8 +374,11 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
                     }
                 },
                 actions = {
-                    if (state.activeTurnId != null) IconButton(onClick = model::interrupt) { Icon(Icons.Default.Stop, "Stop", tint = Coral) }
-                    if (state.threadLoaded) {
+                    if (state.activeTurnId != null && state.canWriteThread) IconButton(onClick = model::interrupt) { Icon(Icons.Default.Stop, "Stop", tint = Coral) }
+                    if (state.threadReadOnly) {
+                        IconButton(onClick = model::reloadThread, enabled = !state.loadingThread) { Icon(Icons.Default.Refresh, "刷新只读会话") }
+                    }
+                    if (state.threadLoaded && !state.threadReadOnly) {
                         IconButton(
                             onClick = model::closePhoneSession,
                             enabled = state.activeTurnId == null && !state.closingSession && !state.sending,
@@ -351,6 +398,15 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
             Column(
                 Modifier.fillMaxWidth().background(Paper).navigationBarsPadding().padding(12.dp),
             ) {
+                if (state.threadReadOnly) {
+                    Column(Modifier.fillMaxWidth().background(Color(0xFFFFF3D9), RoundedCornerShape(6.dp)).padding(10.dp)) {
+                        Text("此会话正在其他客户端中使用，当前仅可查看。", color = Color(0xFF825A12), style = MaterialTheme.typography.bodySmall)
+                        TextButton(onClick = model::reloadThread, enabled = !state.loadingThread, modifier = Modifier.align(Alignment.End)) {
+                            Text(if (state.loadingThread) "正在重试…" else "重试继续")
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
                 if (state.draftImages.isNotEmpty()) {
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 8.dp)) {
                         items(state.draftImages, key = { it.id }) { image ->
@@ -358,7 +414,7 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
                                 AttachmentPreview(image.previewPath, image.name, Modifier.fillMaxSize())
                                 IconButton(
                                     onClick = { model.removeImage(image.id) },
-                                    enabled = !state.sending,
+                                    enabled = !state.sending && !state.threadReadOnly,
                                     modifier = Modifier.align(Alignment.TopEnd).size(32.dp).background(Paper, RoundedCornerShape(4.dp)),
                                 ) { Icon(Icons.Default.Close, "移除图片", modifier = Modifier.size(18.dp)) }
                             }
@@ -382,15 +438,15 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
                     ) {
                         IconButton(
                             onClick = { imagePicker.launch(PickVisualMediaRequest(PickVisualMedia.ImageOnly)) },
-                            enabled = !state.sending && !state.preparingImages && state.draftImages.size < MAX_MESSAGE_IMAGES,
+                            enabled = !state.threadReadOnly && !state.sending && !state.preparingImages && state.draftImages.size < MAX_MESSAGE_IMAGES,
                         ) { Icon(Icons.Default.Image, "添加图片") }
                     }
                     OutlinedTextField(
                         value = input,
                         onValueChange = model::updateDraft,
-                        enabled = !state.sending,
+                        enabled = !state.threadReadOnly && !state.sending,
                         modifier = Modifier.weight(1f),
-                        placeholder = { Text(if (state.activeTurnId == null) "Message Codex" else "Queue or steer Codex") },
+                        placeholder = { Text(if (state.threadReadOnly) "会话被占用，暂时无法输入" else if (state.activeTurnId == null) "Message Codex" else "Queue or steer Codex") },
                         maxLines = 5,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                         keyboardActions = KeyboardActions(onSend = { if (canSend) model.send(input) }),
@@ -400,7 +456,7 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
                         Icon(Icons.Default.Send, "Send")
                     }
                 }
-                if (state.activeTurnId != null) {
+                if (state.activeTurnId != null && !state.threadReadOnly) {
                     TextButton(onClick = { model.send(input, steer = true) }, enabled = canSend, modifier = Modifier.align(Alignment.End)) {
                         Text("Steer")
                     }

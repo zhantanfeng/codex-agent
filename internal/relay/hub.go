@@ -18,12 +18,16 @@ import (
 const maxMessageSize = 2 << 20
 
 type Hub struct {
-	log      *slog.Logger
-	upgrader websocket.Upgrader
-	guard    *protocol.ReplayGuard
-	mu       sync.RWMutex
-	hosts    map[string]*peer
-	clients  map[string]map[string]*peer
+	log          *slog.Logger
+	upgrader     websocket.Upgrader
+	guard        *protocol.ReplayGuard
+	mu           sync.RWMutex
+	hosts        map[string]*peer
+	clients      map[string]map[string]*peer
+	pairingGuard *protocol.ReplayGuard
+	pairings     map[string]linkRegistration
+	lookups      map[string]lookupWindow
+	globalLookup lookupWindow
 }
 
 type peer struct {
@@ -47,7 +51,9 @@ func NewHub(log *slog.Logger) *Hub {
 			HandshakeTimeout: 10 * time.Second,
 			CheckOrigin:      func(*http.Request) bool { return true },
 		},
-		guard: protocol.NewReplayGuard(5 * time.Minute),
+		guard:        protocol.NewReplayGuard(5 * time.Minute),
+		pairingGuard: protocol.NewReplayGuard(5 * time.Minute),
+		pairings:     make(map[string]linkRegistration), lookups: make(map[string]lookupWindow),
 		hosts: make(map[string]*peer), clients: make(map[string]map[string]*peer),
 	}
 }
@@ -59,6 +65,8 @@ func (h *Hub) Handler() http.Handler {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.HandleFunc("/ws", h.serveWebSocket)
+	mux.HandleFunc("/pairing/register", h.registerPairing)
+	mux.HandleFunc("/pairing/resolve", h.resolvePairing)
 	return mux
 }
 
@@ -132,6 +140,10 @@ func (h *Hub) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) route(from *peer, raw []byte, env protocol.Envelope) error {
+	if from.role == "agent" && env.Kind == "pair.consumed" {
+		h.consumePairing(from, env)
+		return nil
+	}
 	if from.role == "client" {
 		if env.TargetID != from.hostID {
 			return errors.New("client target does not match its host")
@@ -170,6 +182,7 @@ func (h *Hub) add(p *peer) {
 	defer h.mu.Unlock()
 	if p.role == "agent" {
 		if existing := h.hosts[p.hostID]; existing != nil {
+			h.removeHostPairingLocked(existing)
 			h.closeWith(existing.conn, websocket.CloseNormalClosure, "replaced by a newer connection")
 		}
 		h.hosts[p.hostID] = p
@@ -189,6 +202,7 @@ func (h *Hub) remove(p *peer) {
 	defer h.mu.Unlock()
 	if p.role == "agent" {
 		if h.hosts[p.hostID] == p {
+			h.removeHostPairingLocked(p)
 			delete(h.hosts, p.hostID)
 		}
 	} else if h.clients[p.hostID][p.id] == p {

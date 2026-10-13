@@ -89,6 +89,11 @@ func (r *Runtime) imageCommand(command commandPayload) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if command.Action != "image.thumbnail" {
+		if err := r.requireWritableThread(data.ThreadID); err != nil {
+			return nil, err
+		}
+	}
 	record, loadErr := loadImageRecord(base)
 	if command.Action == "image.begin" {
 		digest, digestErr := hex.DecodeString(data.SHA256)

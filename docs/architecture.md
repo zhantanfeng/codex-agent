@@ -15,7 +15,7 @@ Compose UI                           route by host/client IDs        codex app-s
 - Signed fields and payloads cannot be modified without detection.
 - A session ID plus monotonically increasing sequence number rejects replayed frames.
 - Timestamps limit captured frames to a five-minute acceptance window.
-- Initial trust requires matching a six-digit short authentication string on Windows and Android.
+- QR pairing requires matching a six-digit short authentication string on Windows and Android. The alternative connection-code flow authorizes the first phone presenting the Relay-resolved one-time token, without a separate Windows confirmation. Its six-digit code expires after ten minutes, is consumed after pairing, and lookup attempts are rate limited.
 - Windows project paths are an explicit allowlist.
 
 ## What is not protected
@@ -23,6 +23,7 @@ Compose UI                           route by host/client IDs        codex app-s
 - The public Relay and on-path observers can read every Base64URL-decoded payload.
 - An observer can block traffic or identify when a Codex task is running.
 - The Relay can disconnect or withhold messages.
+- Connection-code pairing trusts the Relay to supply the host identity. Anyone who obtains the connection code before it expires can pair; this flow has no second confirmation step. Use a trusted Relay and `wss://` for confidential transport. QR pairing retains the manual identity confirmation step.
 - A malicious Relay can cause denial of service by replacing a connection, but it cannot produce a signature accepted by the Windows Agent.
 
 ## Codex boundary
@@ -37,4 +38,3 @@ The adapter supports:
 - command and file-change approval requests
 
 Other app-server requests are not automatically approved.
-
