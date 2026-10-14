@@ -161,9 +161,20 @@ func TestCodexVersionCompatibility(t *testing.T) {
 		{version: "codex-cli 0.156.1", want: true},
 		{version: "codex-cli 0.161.0", want: true},
 		{version: "codex-cli 0.161.9", want: true},
-		{version: "codex-cli 0.157.0", want: false},
-		{version: "codex-cli 0.160.9", want: false},
-		{version: "codex-cli 0.162.0", want: false},
+		{version: "codex-cli 0.157.0", want: true},
+		{version: "codex-cli 0.160.9", want: true},
+		{version: "codex-cli 0.162.1", want: true},
+		{version: "codex-cli 0.163.0-alpha.1", want: true},
+		{version: "codex-cli 0.200.0+build.1", want: true},
+		{version: "codex-cli 1.0.0", want: true},
+		{version: "codex-cli 0.155.9", want: false},
+		{version: "codex-cli 0.156.", want: false},
+		{version: "codex-cli 0.161.invalid", want: false},
+		{version: "codex-cli 0.162.1 garbage", want: false},
+		{version: "codex-cli 0.162.1.2", want: false},
+		{version: "codex-cli 999999999999.162.1", want: false},
+		{version: "other-cli 0.162.1", want: false},
+		{version: "", want: false},
 	}
 	for _, test := range tests {
 		t.Run(test.version, func(t *testing.T) {

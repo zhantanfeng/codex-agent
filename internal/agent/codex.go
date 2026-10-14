@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,17 +43,26 @@ type CodexClient struct {
 	closeErr   error
 }
 
-const supportedCodexVersionDescription = "0.156.x or 0.161.x"
+const supportedCodexVersionDescription = "0.156.0 or newer"
 
-var supportedCodexVersionPrefixes = []string{"codex-cli 0.156.", "codex-cli 0.161."}
+var codexVersionPattern = regexp.MustCompile(`^codex-cli ([0-9]+)\.([0-9]+)\.([0-9]+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
 
 func isSupportedCodexVersion(version string) bool {
-	for _, prefix := range supportedCodexVersionPrefixes {
-		if strings.HasPrefix(version, prefix) {
-			return true
-		}
+	parts := codexVersionPattern.FindStringSubmatch(version)
+	if parts == nil {
+		return false
 	}
-	return false
+	var numbers [3]uint64
+	for i := range numbers {
+		value, err := strconv.ParseUint(parts[i+1], 10, 32)
+		if err != nil {
+			return false
+		}
+		numbers[i] = value
+	}
+	// Enforce the oldest supported stable API, not an exact release whitelist.
+	// Newer releases must still complete the app-server initialization handshake.
+	return numbers[0] > 0 || numbers[1] >= 156
 }
 
 func StartCodex(ctx context.Context, command string, log *slog.Logger, onMessage func(CodexMessage)) (*CodexClient, error) {
@@ -91,16 +102,17 @@ func StartCodex(ctx context.Context, command string, log *slog.Logger, onMessage
 	defer cancel()
 	var initialized map[string]any
 	if err := client.Call(initCtx, "initialize", map[string]any{
-		"clientInfo":   map[string]any{"name": "codex-remote-agent", "title": "Codex Remote", "version": "0.1.11"},
+		"clientInfo":   map[string]any{"name": "codex-remote-agent", "title": "Codex Remote", "version": "0.1.12"},
 		"capabilities": map[string]any{"experimentalApi": false, "requestAttestation": false},
 	}, &initialized); err != nil {
 		_ = client.Close()
-		return nil, fmt.Errorf("initialize app-server: %w", err)
+		return nil, fmt.Errorf("initialize Codex CLI %q app-server: %w", version, err)
 	}
 	if err := client.notify("initialized", nil); err != nil {
 		_ = client.Close()
 		return nil, err
 	}
+	log.Info("Codex app-server connected", "version", version)
 	return client, nil
 }
 

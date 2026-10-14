@@ -270,7 +270,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                 val action = if (steer && snapshot.activeTurnId != null) "turn.steer" else "turn.start"
                 if (action == "turn.steer") data.put("turnId", snapshot.activeTurnId)
                 remote.request(action, data)
-                update { it.copy(draftText = "", draftImages = emptyList()) }
+                update { applyFirstMessageTitle(it, thread.id, trimmed).copy(draftText = "", draftImages = emptyList()) }
             } catch (error: Exception) {
                 if (error is CancellationException && !isActive) throw error
                 val displayError = when {
@@ -358,10 +358,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
             }
             "threads.list" -> {
                 val rows = (data as? JSONObject)?.optJSONArray("data") ?: JSONArray()
-                val threads = (0 until rows.length()).map { parseThread(rows.getJSONObject(it)) }
                 update {
-                    it.copy(
-                        threads = threads,
+                    applyThreadList(it, rows).copy(
                         error = if (it.selectedThread == null && it.error?.reconnectRequired == true) null else it.error,
                     )
                 }
@@ -392,7 +390,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
             "events.sync" -> {
                 val synced = data as? JSONObject ?: return
                 val events = synced.optJSONArray("events") ?: JSONArray()
-                for (index in 0 until events.length()) handleCodexEvent(events.getJSONObject(index))
+                for (index in 0 until events.length()) handleCodexEvent(events.getJSONObject(index), refreshTitle = false)
                 val approvals = synced.optJSONArray("approvals") ?: JSONArray()
                 for (index in 0 until approvals.length()) handleApproval(approvals.getJSONObject(index))
             }
@@ -423,18 +421,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
         remote.command("events.sync", JSONObject().put("after", state.value.lastEventId))
     }
 
-    private fun handleCodexEvent(event: JSONObject) {
+    private fun handleCodexEvent(event: JSONObject, refreshTitle: Boolean = true) {
         val eventId = event.optLong("eventId")
         if (eventId != 0L && eventId <= state.value.lastEventId) return
         val method = event.optString("method")
         val params = event.optJSONObject("params") ?: JSONObject()
+        if (method == "thread/name/updated") {
+            update { applyThreadNameUpdate(it, params).copy(lastEventId = if (eventId > 0) eventId else it.lastEventId) }
+            return
+        }
         if (params.optString("threadId").isNotEmpty() && params.optString("threadId") != state.value.selectedThread?.id) {
             if (eventId > 0) update { it.copy(lastEventId = eventId) }
             return
         }
         when (method) {
             "turn/started" -> update { it.copy(activeTurnId = params.optJSONObject("turn")?.optString("id")) }
-            "turn/completed" -> update { it.copy(activeTurnId = null) }
+            "turn/completed" -> {
+                update { it.copy(activeTurnId = null) }
+                if (refreshTitle) loadThreads()
+            }
             "item/agentMessage/delta" -> appendDelta(params.optString("itemId"), params.optString("delta"))
             "item/commandExecution/outputDelta" -> appendDelta(params.optString("itemId"), params.optString("delta"), "command")
             "item/fileChange/patchUpdated" -> upsertMessage(
@@ -483,7 +488,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                         it.id == message.id || (it.id.startsWith("local-") && it.text == message.text && it.images.map { image -> image.id } == message.images.map { image -> image.id })
                     }
                     if (index >= 0) messages[index] = message else messages += message
-                    current.copy(messages = messages)
+                    applyFirstMessageTitle(current, current.selectedThread?.id.orEmpty(), message.text).copy(messages = messages)
                 }
             }
             "agentMessage" -> upsertMessage(id, "assistant", item.optString("text"))

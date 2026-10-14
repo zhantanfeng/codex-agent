@@ -1,5 +1,5 @@
 FROM scratch
-COPY codex-relay /codex-relay
+COPY --chmod=0555 codex-relay /codex-relay
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/codex-relay", "-listen", ":8080"]

@@ -12,7 +12,7 @@ Codex Remote lets an Android phone control Codex running on a Windows computer. 
 - `android-app`: Android 12+ Compose client.
 - `internal/protocol`: signed envelope and replay protection shared by the Go services.
 
-The Agent supports Codex CLI `0.156.x` and `0.161.x`. Its adapter was checked against their generated app-server schemas; it fails fast on unsupported versions.
+The Agent requires Codex CLI `0.156.0` or newer and uses the stable app-server API. Its adapter was checked against the generated schemas for `0.156.x`, `0.161.x`, and `0.162.1`. Newer versions are allowed to initialize instead of being rejected by a release whitelist; incompatible initialization reports the CLI version and underlying error.
 
 ## Build
 
@@ -55,7 +55,7 @@ ws://PUBLIC_IP:8080/ws
 
 ## Configure Windows
 
-Install Codex CLI `0.156.x` or `0.161.x`, sign in normally, and verify `codex --version` works in the same Windows account that will run the Agent.
+Install Codex CLI `0.156.0` or newer, sign in normally, and verify `codex --version` works in the same Windows account that will run the Agent.
 
 ```powershell
 bin\codex-remote.exe init -relay ws://PUBLIC_IP:8080/ws
