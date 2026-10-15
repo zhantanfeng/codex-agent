@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,6 +20,21 @@ import (
 	"codexremote/internal/relay"
 	"github.com/gorilla/websocket"
 )
+
+func readLinkTestEnvelope(t *testing.T, phone *websocket.Conn, kind string) protocol.Envelope {
+	t.Helper()
+	_ = phone.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		var envelope protocol.Envelope
+		if err := phone.ReadJSON(&envelope); err != nil {
+			t.Fatalf("waiting for %s: %v", kind, err)
+		}
+		// An online-status broadcast can race the initial pairing response.
+		if envelope.Kind == kind {
+			return envelope
+		}
+	}
+}
 
 func TestSixDigitCodePairsPhoneAndKeepsAuthorization(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -93,10 +110,7 @@ func TestSixDigitCodePairsPhoneAndKeepsAuthorization(t *testing.T) {
 	pair, _ := phoneSigner.Sign(pairing.HostID, "pair.request", pairingRequest{Code: pairing.Token, ClientID: "phone-link-test", PublicKey: phoneSigner.PublicKeyBase64()})
 	_ = phone.WriteJSON(pair)
 	_ = phone.SetReadDeadline(time.Now().Add(3 * time.Second))
-	var accepted protocol.Envelope
-	if err := phone.ReadJSON(&accepted); err != nil {
-		t.Fatal(err)
-	}
+	accepted := readLinkTestEnvelope(t, phone, "pair.accepted")
 	if accepted.Kind != "pair.accepted" || protocol.Verify(accepted, public) != nil {
 		t.Fatalf("phone was not paired: %s", accepted.Kind)
 	}
@@ -104,11 +118,55 @@ func TestSixDigitCodePairsPhoneAndKeepsAuthorization(t *testing.T) {
 	if saved.Pairing != nil || saved.Clients["phone-link-test"] != phoneSigner.PublicKeyBase64() {
 		t.Fatal("pairing was not consumed and persisted")
 	}
+	// Directory commands use the unchanged Relay and the phone's saved key.
+	selectedPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(selectedPath, "手机选择的目录"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client := &CodexClient{pending: map[string]chan CodexMessage{}}
+	client.stdin = &directoryCodexStub{client: client, path: selectedPath}
+	runtime.codexMu.Lock()
+	runtime.codex = client
+	runtime.codexMu.Unlock()
+	for index, action := range []string{"directories.list", "thread.start"} {
+		requestID := fmt.Sprintf("directory-%d", index)
+		command, _ := phoneSigner.Sign(pairing.HostID, "command", map[string]any{
+			"requestId": requestID, "action": action, "data": map[string]string{"path": selectedPath},
+		})
+		if err := phone.WriteJSON(command); err != nil {
+			t.Fatal(err)
+		}
+		response := readLinkTestEnvelope(t, phone, "response")
+		if response.Kind != "response" || protocol.Verify(response, public) != nil {
+			t.Fatalf("invalid signed directory response: %s", response.Kind)
+		}
+		var payload struct {
+			RequestID string         `json:"requestId"`
+			OK        bool           `json:"ok"`
+			Data      map[string]any `json:"data"`
+			Error     string         `json:"error"`
+		}
+		if err := protocol.DecodePayload(response, &payload); err != nil || !payload.OK || payload.RequestID != requestID {
+			t.Fatalf("directory command failed: %+v, %v", payload, err)
+		}
+		if action == "directories.list" {
+			entries, _ := payload.Data["entries"].([]any)
+			if len(entries) != 1 || payload.Data["path"] != selectedPath {
+				t.Fatalf("unexpected directory listing: %+v", payload.Data)
+			}
+		} else {
+			thread, _ := payload.Data["thread"].(map[string]any)
+			if thread["cwd"] != selectedPath || thread["id"] != "new-thread" {
+				t.Fatalf("session did not use the phone-selected folder: %+v", thread)
+			}
+		}
+	}
 	// The saved device authenticates again without the one-time pairing code.
 	pair, _ = phoneSigner.Sign(pairing.HostID, "pair.request", pairingRequest{ClientID: "phone-link-test", PublicKey: phoneSigner.PublicKeyBase64()})
 	_ = phone.WriteJSON(pair)
-	if err := phone.ReadJSON(&accepted); err != nil || accepted.Kind != "pair.accepted" {
-		t.Fatalf("saved authorization was lost: %v", err)
+	accepted = readLinkTestEnvelope(t, phone, "pair.accepted")
+	if accepted.Kind != "pair.accepted" {
+		t.Fatal("saved authorization was lost")
 	}
 	response, err = http.Post(server.URL+"/pairing/resolve", "application/json", strings.NewReader(`{"code":"`+code+`"}`))
 	if err != nil {

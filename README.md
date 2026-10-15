@@ -87,6 +87,10 @@ bin\codex-remote.exe install
 
 Other management commands:
 
+With Agent and Android `0.1.13` or newer, tap **浏览电脑目录 / 新建会话** on the phone. Browse the computer's drives and folders, go up a level, or enter an absolute Windows path. Tap **在此目录新建会话** to create a session in that folder, including an empty folder. Only folders are listed, one level at a time, with pagination; no file contents are fetched. Access uses the Windows account running the Agent. Inaccessible, missing, or disconnected directories show an error and can be retried.
+
+**Access change:** Every paired phone can browse directories accessible to that Windows account, beyond the previously configured projects. Browsing alone does not change the session allowlist. Explicitly selecting a folder to create a session adds only that exact directory to the saved project list, so its sessions remain available after restarting the Agent. Parents and other drives are not automatically authorized for sessions. Existing pairing, approvals, and read-only occupied sessions are unchanged. The Relay does not need an update for directory browsing. Directory names and paths still traverse the configured transport; use TLS (`wss://`) to keep them private in transit.
+
 ```powershell
 bin\codex-remote.exe status
 bin\codex-remote.exe project list

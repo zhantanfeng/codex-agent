@@ -51,12 +51,15 @@ data class UiState(
     val sending: Boolean = false,
     val uploadProgress: String = "",
     val imagePreviews: Map<String, String> = emptyMap(),
+    val directories: DirectoryBrowserState = DirectoryBrowserState(),
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application), RemoteClient.Listener {
     private val remote = RemoteClient(application, this)
     private var preparationJob: Job? = null
     private var sendJob: Job? = null
+    private var directoryJob: Job? = null
+    private var directoryGeneration = 0
     private val previewRequests = ConcurrentHashMap.newKeySet<String>()
     var state = androidx.compose.runtime.mutableStateOf(
         UiState(setupRequired = !remote.configured(), paired = remote.paired),
@@ -95,6 +98,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     }
 
     fun showPairing() {
+        directoryJob?.cancel()
+        directoryGeneration++
         remote.disconnect()
         update { UiState(setupRequired = true) }
     }
@@ -176,6 +181,68 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     fun createThread(project: ProjectUi) {
         update { it.copy(error = null, retryCommand = null) }
         remote.command("thread.start", JSONObject().put("projectId", project.id))
+    }
+
+    fun openDirectories() {
+        update { it.copy(directories = it.directories.copy(visible = true, error = null)) }
+        browseDirectory(state.value.directories.path)
+    }
+
+    fun closeDirectories() {
+        directoryGeneration++
+        directoryJob?.cancel()
+        update { it.copy(directories = it.directories.copy(visible = false, loading = false, creating = false)) }
+    }
+
+    fun updateDirectoryInput(value: String) = update { it.copy(directories = it.directories.copy(input = value)) }
+
+    fun browseDirectory(path: String, offset: Int = 0) {
+        if (state.value.directories.creating) return
+        directoryJob?.cancel()
+        val generation = ++directoryGeneration
+        update { it.copy(directories = it.directories.copy(visible = true, loading = true, error = null, requestedPath = path, requestedOffset = offset)) }
+        directoryJob = viewModelScope.launch {
+            try {
+                val data = remote.request("directories.list", JSONObject().put("path", path).put("offset", offset))
+                if (generation != directoryGeneration) return@launch
+                update { it.copy(directories = applyDirectoryPage(it.directories, data, append = offset > 0)) }
+            } catch (error: Exception) {
+                if (error is CancellationException && !isActive) throw error
+                if (generation == directoryGeneration) update {
+                    it.copy(directories = it.directories.copy(loading = false, error = directoryFailure(error.message)))
+                }
+            }
+        }
+    }
+
+    fun retryDirectory() {
+        val browser = state.value.directories
+        browseDirectory(browser.requestedPath, browser.requestedOffset)
+    }
+
+    fun createThreadInDirectory() {
+        val browser = state.value.directories
+        if (browser.path.isBlank() || browser.loading || browser.creating || browser.error != null) return
+        directoryJob?.cancel()
+        val generation = ++directoryGeneration
+        update { it.copy(directories = it.directories.copy(creating = true, error = null)) }
+        directoryJob = viewModelScope.launch {
+            try {
+                val data = remote.request("thread.start", JSONObject().put("path", browser.path))
+                if (generation != directoryGeneration) return@launch
+                cancelImageWork()
+                update {
+                    applyThreadResponse(it.copy(draftText = "", draftImages = emptyList(), approval = null), "thread.start", data)
+                        .copy(directories = it.directories.copy(visible = false, creating = false))
+                }
+                loadProjects()
+            } catch (error: Exception) {
+                if (error is CancellationException && !isActive) throw error
+                if (generation == directoryGeneration) update {
+                    it.copy(directories = it.directories.copy(creating = false, error = directoryFailure(error.message)))
+                }
+            }
+        }
     }
 
     fun openThread(thread: ThreadUi) {

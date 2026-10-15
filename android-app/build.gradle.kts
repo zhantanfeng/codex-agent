@@ -12,8 +12,8 @@ android {
         applicationId = "dev.codexremote.app"
         minSdk = 31
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.1.12"
+        versionCode = 14
+        versionName = "0.1.13"
 
         val relayUrl = providers.gradleProperty("dcodeRelayUrl").getOrElse("ws://43.155.135.230:8080/ws")
         buildConfigField("String", "DEFAULT_RELAY_URL", "\"${relayUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\"")

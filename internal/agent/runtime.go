@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -279,6 +278,10 @@ func pairingSAS(hostPublic, clientID, clientPublic, code string) string {
 }
 
 func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, error) {
+	// Directory browsing is read-only and must not block approvals or turns.
+	if command.Action == "directories.list" {
+		return listDirectories(ctx, command.Data)
+	}
 	r.commandMu.Lock()
 	defer r.commandMu.Unlock()
 
@@ -305,13 +308,27 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 	case "thread.start":
 		var data struct {
 			ProjectID string `json:"projectId"`
+			Path      string `json:"path"`
 		}
 		if err := json.Unmarshal(command.Data, &data); err != nil {
 			return nil, err
 		}
-		path, ok := config.Projects[data.ProjectID]
-		if !ok {
-			return nil, errors.New("project is not in the Windows allowlist")
+		path := data.Path
+		if path != "" {
+			var err error
+			path, err = readableDirectory(path)
+			if err != nil {
+				return nil, err
+			}
+			if err := r.rememberDirectory(path); err != nil {
+				return nil, err
+			}
+		} else {
+			var ok bool
+			path, ok = config.Projects[data.ProjectID]
+			if !ok {
+				return nil, errors.New("project is not in the Windows allowlist")
+			}
 		}
 		var result map[string]any
 		err := r.callCodex(ctx, "thread/start", threadStartParams(path), &result)
@@ -726,9 +743,8 @@ func (r *Runtime) markThreadResult(result map[string]any) {
 func (r *Runtime) resultInAllowlist(result map[string]any) bool {
 	thread, _ := result["thread"].(map[string]any)
 	cwd, _ := thread["cwd"].(string)
-	clean := filepath.Clean(cwd)
 	for _, allowed := range r.currentConfig().Projects {
-		if strings.EqualFold(clean, filepath.Clean(allowed)) {
+		if sameDirectory(cwd, allowed) {
 			return true
 		}
 	}

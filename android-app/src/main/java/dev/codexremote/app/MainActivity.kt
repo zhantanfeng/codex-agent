@@ -154,6 +154,7 @@ private fun App(model: MainViewModel) {
     Surface(modifier = Modifier.fillMaxSize(), color = Canvas) {
         when {
             state.setupRequired || !state.paired -> SetupScreen(state, model)
+            state.directories.visible -> DirectoryBrowserScreen(state, model)
             state.selectedThread != null -> ConversationScreen(state, model)
             else -> HomeScreen(state, model)
         }
@@ -161,9 +162,9 @@ private fun App(model: MainViewModel) {
             ErrorBanner(
                 error = it,
                 canRetry = state.retryCommand != null || (state.draftImages.isNotEmpty() && state.threadLoaded && !state.sending && !it.reconnectRequired),
-                canGoBack = state.selectedThread != null,
+                canGoBack = state.selectedThread != null || state.directories.visible,
                 onRetry = model::retry,
-                onBack = model::closeThread,
+                onBack = { if (state.directories.visible) model.closeDirectories() else model.closeThread() },
                 onReconnect = model::reconnect,
                 onDismiss = model::dismissError,
             )
@@ -296,6 +297,17 @@ private fun HomeScreen(state: UiState, model: MainViewModel) {
         },
     ) { padding ->
         LazyColumn(modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding), contentPadding = PaddingValues(bottom = 28.dp)) {
+            item {
+                Button(
+                    onClick = model::openDirectories,
+                    enabled = state.connection == RemoteClient.ConnectionStatus.CONNECTED,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+                ) {
+                    Icon(Icons.Default.Computer, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("浏览电脑目录 / 新建会话")
+                }
+            }
             item { SectionHeader("Projects", "Start a new Codex session") }
             items(state.projects, key = { it.id }) { project -> ProjectRow(project) { model.createThread(project) } }
             item { SectionHeader("Recent sessions", "Running on your Windows computer") }
@@ -668,7 +680,7 @@ private fun StatusDot(active: Boolean) {
 private fun EmptyState() {
     Column(Modifier.fillMaxWidth().padding(40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Text("No projects yet", fontWeight = FontWeight.Medium)
-        Text("Add a project on Windows, then refresh.", color = Muted, style = MaterialTheme.typography.bodySmall)
+        Text("点击“浏览电脑目录”，选择文件夹即可新建会话。", color = Muted, style = MaterialTheme.typography.bodySmall)
     }
 }
 
