@@ -5,9 +5,21 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DirectoryStateTest {
+    @Test
+    fun creationUsesOnlyTheSuccessfullyLoadedFolder() {
+        val loaded = DirectoryBrowserState(path = "D:\\projects", input = "D:\\projects")
+        assertTrue(loaded.canCreateSession)
+        assertFalse(loaded.copy(input = "D:\\other").canCreateSession)
+        assertFalse(loaded.copy(loading = true).canCreateSession)
+        assertFalse(loaded.copy(creating = true).canCreateSession)
+        assertFalse(loaded.copy(error = "目录不存在").canCreateSession)
+        assertFalse(DirectoryBrowserState().canCreateSession)
+    }
+
     private fun page(path: String, names: List<String>, next: Int? = null) = JSONObject()
         .put("path", path).put("parent", if (path == "D:\\") "" else "D:\\")
         .put("entries", JSONArray(names.map { JSONObject().put("name", it).put("path", "$path\\$it") }))

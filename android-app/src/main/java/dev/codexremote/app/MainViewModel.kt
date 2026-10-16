@@ -222,7 +222,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
 
     fun createThreadInDirectory() {
         val browser = state.value.directories
-        if (browser.path.isBlank() || browser.loading || browser.creating || browser.error != null) return
+        if (!browser.canCreateSession || state.value.connection != RemoteClient.ConnectionStatus.CONNECTED) return
         directoryJob?.cancel()
         val generation = ++directoryGeneration
         update { it.copy(directories = it.directories.copy(creating = true, error = null)) }

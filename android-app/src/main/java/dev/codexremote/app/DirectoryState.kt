@@ -18,6 +18,9 @@ data class DirectoryBrowserState(
     val requestedOffset: Int = 0,
 )
 
+internal val DirectoryBrowserState.canCreateSession: Boolean
+    get() = path.isNotBlank() && input.trim() == path && !loading && !creating && error == null
+
 internal fun applyDirectoryPage(state: DirectoryBrowserState, data: JSONObject, append: Boolean): DirectoryBrowserState {
     val path = data.getString("path")
     val rows = data.getJSONArray("entries")

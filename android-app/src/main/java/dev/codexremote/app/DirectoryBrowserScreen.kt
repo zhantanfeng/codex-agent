@@ -122,7 +122,7 @@ internal fun DirectoryBrowserScreen(state: UiState, model: MainViewModel) {
             }
             Button(
                 onClick = model::createThreadInDirectory,
-                enabled = connected && browser.path.isNotBlank() && !busy && browser.error == null,
+                enabled = connected && browser.canCreateSession,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             ) {
                 Icon(Icons.Default.Add, contentDescription = null)

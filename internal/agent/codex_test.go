@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -59,7 +60,14 @@ func TestInstalledCodexStableAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	cwd := t.TempDir()
+	selected := filepath.Join(t.TempDir(), "手机选择目录 with spaces")
+	if err := os.Mkdir(selected, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := readableDirectory(selected)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var listed map[string]any
 	if err := client.Call(ctx, "thread/list", map[string]any{
 		"limit": 1, "sortKey": "recency_at", "sortDirection": "desc",
@@ -80,6 +88,9 @@ func TestInstalledCodexStableAPI(t *testing.T) {
 	thread, _ := started["thread"].(map[string]any)
 	if id, _ := thread["id"].(string); id == "" || thread["ephemeral"] != true {
 		t.Fatal("thread/start did not return an ephemeral session")
+	}
+	if actual, _ := thread["cwd"].(string); !sameDirectory(cwd, actual) {
+		t.Fatalf("thread/start used working directory %q, want %q", actual, cwd)
 	}
 	t.Log("Installed Codex CLI initialized, listed sessions, and started an ephemeral session using the stable API.")
 }
