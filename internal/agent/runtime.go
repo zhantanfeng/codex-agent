@@ -43,6 +43,10 @@ type Runtime struct {
 	readOnlyThreads map[string]bool
 	activeTurns     map[string]string
 	queues          map[string][]queuedTurn
+	statusMu        sync.RWMutex
+	linkCode        string
+	linkExpires     time.Time
+	lastPhone       time.Time
 }
 
 type queuedTurn struct {
@@ -93,6 +97,11 @@ func NewRuntime(store *Store, config *Config, private ed25519.PrivateKey, log *s
 }
 
 func (r *Runtime) Run(ctx context.Context) error {
+	release, err := acquireRunLock(r.currentConfig().HostID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	r.runCtx = ctx
 	codex, err := StartCodex(ctx, r.currentConfig().CodexCommand, r.log, r.onCodexMessage)
 	if err != nil {
@@ -203,6 +212,9 @@ func (r *Runtime) handleEnvelope(env protocol.Envelope) {
 		return
 	}
 	command.clientID = env.SenderID
+	r.statusMu.Lock()
+	r.lastPhone = time.Now()
+	r.statusMu.Unlock()
 	go r.handleCommand(env.SenderID, command)
 }
 

@@ -1,0 +1,39 @@
+# dcode Windows 桌面版
+
+双击 `bin/dcode-desktop.exe`。桌面版直接包含电脑 Agent，不需要另开 PowerShell 执行 `run`。手机和 Relay 可以沿用现有版本。
+
+## 首次打开
+
+1. 先在原来的 `codex-remote.exe run` 窗口按 Ctrl+C，退出旧后台，避免两端同时连接同一个 Relay 身份。
+2. 双击 `dcode-desktop.exe`。它自动读取当前 Windows 用户的 `%LOCALAPPDATA%\CodexRemote` 配置，保留原有手机配对、项目和 Codex 登录信息。
+3. 已配对的手机直接连接。新手机可以输入界面上的六位连接码或扫描二维码。配对码十分钟有效、成功配对后失效；刷新配对码不会重启 Codex。
+4. 关闭窗口后继续在系统托盘运行。点击托盘图标重新打开；右键可以启动、停止后台或退出软件。
+
+新电脑需要先安装并登录 Codex CLI，再在桌面界面填写 Relay WebSocket 地址。界面显示的是已配对设备数，不代表这些手机当前在线。
+
+## 自启动与保持唤醒
+
+- “登录 Windows 后自动启动”写入当前用户的启动项，登录后启动到托盘。无需管理员权限。勾选后不要移动 EXE；移动后重新关闭、开启这个选项即可更新路径。
+- 如果以前用 `codex-remote.exe install` 注册过旧计划任务，请先关闭旧的 `CodexRemoteAgent` 登录任务，避免与桌面版自启动重复。可以在 Windows 任务计划程序中禁用它，或执行 `schtasks /Change /TN CodexRemoteAgent /DISABLE`。
+- “运行期间保持电脑唤醒”默认关闭。开启后防止自动睡眠，屏幕仍可关闭；停止后台或退出软件后释放。它不会阻止手动睡眠、关机或系统强制休眠。
+- Codex 子进程异常退出会自动重试启动；Relay 断线会自动重连。桌面软件本身完全退出后不再运行，由下一次手动启动或 Windows 登录启动恢复。
+
+保持 Codex CLI 安装位置可用。默认通过用户环境中的 `codex` 查找，登录自启动时也需要能找到该命令。WebView2 Runtime 是界面运行依赖，缺失时按启动提示安装。
+
+## 管理与日志
+
+- 停止、重启和退出可能中断手机端正在执行的任务，界面会先提示。
+- 已配对设备页面可以撤销手机访问权限。
+- 运行日志页面显示本次启动的最近 200 条日志。磁盘日志位于 `%LOCALAPPDATA%\CodexRemote\desktop.log`，超过 1 MiB 后轮换为 `desktop.log.1`，不会无限增长。
+- 配对、项目、文件访问和执行审批仍使用既有 Agent 逻辑；桌面版不会把本地控制接口暴露到 HTTP 端口。
+- 桌面版及新版命令行通过同一用户会话内的 Windows 命名互斥量防止重复运行。更早的命令行版本不支持该互斥量，启动桌面版前需手动退出。
+
+## 从源码构建
+
+Windows 上安装 Go 后，在仓库根目录运行：
+
+```powershell
+.\scripts\build-desktop.ps1
+```
+
+输出 `bin/dcode-desktop.exe`。界面静态资源嵌入 EXE，构建不依赖 Node、npm 或额外前端开发服务器。

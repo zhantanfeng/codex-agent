@@ -114,6 +114,9 @@ func (r *Runtime) registerLinkPairing(ctx context.Context) error {
 		if json.Unmarshal(body, &result) != nil || len(result.Code) != 6 || strings.Trim(result.Code, "0123456789") != "" {
 			return errors.New("invalid connection code from Relay")
 		}
+		r.statusMu.Lock()
+		r.linkCode, r.linkExpires = result.Code, config.Pairing.ExpiresAt
+		r.statusMu.Unlock()
 		fmt.Printf("\n手机连接码：%s\n在 dcode 中输入这 6 位数字即可连接，有效期至 %s，成功配对后作废。\n已配对手机无需再次输入。\n\n", result.Code, config.Pairing.ExpiresAt.Local().Format("15:04:05"))
 		return nil
 	}

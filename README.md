@@ -85,6 +85,10 @@ After verifying normal operation, register the Agent for startup after Windows l
 bin\codex-remote.exe install
 ```
 
+## Windows desktop
+
+Double-click `bin/dcode-desktop.exe` to run the Agent with a desktop interface and system tray. It reuses existing pairing and projects, shows six-digit pairing codes and QR codes, and supports login startup, optional keep-awake, device revocation, and local logs. Stop any older command-line `run` process first. See [desktop usage and build instructions](docs/desktop.md).
+
 ## Browse computer directories
 
 With Agent and Android `0.1.13` or newer, tap **浏览电脑目录 / 新建会话** on the phone. Browse the computer's drives and folders, go up a level, or enter an absolute Windows path. Tap **在此目录新建会话** to create a session in that folder, including an empty folder. Only folders are listed, one level at a time, with pagination; no file contents are fetched. Access uses the Windows account running the Agent. Inaccessible, missing, or disconnected directories show an error and can be retried.
