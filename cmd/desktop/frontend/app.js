@@ -1,8 +1,20 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const api = () => window.go.desktop.App;
-let state, busy=false, notice='', qrKey='', devicesKey='', polling=false;
+let state, busy=false, notice='', qrKey='', devicesKey='', polling=false, relaySavedURL, initialRender=true;
 const actionButtons=['toggle','restart','refresh-code','configure'];
+function showPage(page){
+  document.querySelectorAll('.nav').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
+  document.querySelectorAll('.page').forEach(p=>p.hidden=p.id!==page);
+  text('page-title',({overview:'连接与配对',server:'服务器设置',devices:'已配对设备',logs:'运行日志'})[page]);
+}
+function updateRelayForm(){
+  if(!state)return;
+  const value=$('relay').value.trim();
+  $('relay').disabled=busy||state.stopping;
+  $('configure').disabled=busy||state.stopping||!value||(state.configured&&value===state.relayUrl);
+  text('configure',!state.configured?'保存并启动':state.running?'保存并重连':'保存地址');
+}
 function showNotice(message){ notice=String(message||''); $('notice').textContent=notice; $('notice').hidden=!notice; }
 async function act(fn){
   if(busy)return;
@@ -20,13 +32,14 @@ async function render(s){
   text('hero-description',online?'手机现在可以访问电脑上的会话':'启动后自动连接 Codex 和中转服务器');
   text('codex-status',s.codexOnline?'已连接':'未连接');text('relay-status',s.relayOnline?'已连接':'未连接');
   text('phone-status',`已配对 ${s.devices.length} 台`);
-  text('relay-address',s.relayURL?`${s.relayURL} · ${s.projects} 个项目`:'尚未配置 Relay');
-  $('setup').hidden=s.configured;
+  text('relay-address',s.relayUrl?`${s.relayUrl} · ${s.projects} 个项目`:'尚未配置 Relay');
+  if(initialRender){initialRender=false;if(!s.configured)showPage('server');}
+  if(relaySavedURL!==s.relayUrl){relaySavedURL=s.relayUrl;$('relay').value=s.relayUrl||'';}
   text('toggle',s.running?'停止后台':'启动后台');
   $('toggle').disabled=busy||s.stopping||!s.configured;
   $('restart').disabled=busy||s.stopping||!s.configured;
   $('refresh-code').disabled=busy||!online||s.stopping;
-  $('configure').disabled=busy;
+  updateRelayForm();
   const code=s.linkCode||'';
   text('code',code||'— — — — — —');$('copy-code').disabled=!code;
   const remaining=Math.max(0,Math.ceil((Date.parse(s.linkExpires)-Date.now())/1000));
@@ -59,15 +72,19 @@ async function poll(){
   if(polling)return;polling=true;
   try{await render(await api().GetState());}catch(e){showNotice('无法读取电脑后台状态：'+String(e));}finally{polling=false;}
 }
-document.querySelectorAll('.nav').forEach(button=>button.onclick=()=>{
-  document.querySelectorAll('.nav').forEach(b=>b.classList.toggle('active',b===button));
-  document.querySelectorAll('.page').forEach(p=>p.hidden=p.id!==button.dataset.page);
-  text('page-title',button.textContent.trim().slice(1).trim());
-});
+document.querySelectorAll('.nav').forEach(button=>button.onclick=()=>showPage(button.dataset.page));
 $('toggle').onclick=()=>{if(!state.running||window.confirm('停止后台将断开手机连接，并可能中断正在执行的任务，继续？'))act(()=>state.running?api().Stop():api().Start());};
 $('restart').onclick=()=>{if(!state.running||window.confirm('重启将断开手机连接，并可能中断正在执行的任务，继续？'))act(()=>api().Restart());};
 $('refresh-code').onclick=()=>act(()=>api().RefreshPairing());
-$('configure').onclick=()=>act(async()=>{await api().Configure($('relay').value.trim());await api().Start();});
+$('relay').oninput=updateRelayForm;
+$('server-form').onsubmit=e=>{
+  e.preventDefault();
+  if(busy||!state||state.stopping)return;
+  const value=$('relay').value.trim(),initialSetup=!state.configured;
+  if(state.configured&&value===state.relayUrl)return;
+  if(state.running&&!window.confirm('更换服务器会断开手机连接，并可能中断正在执行的任务，继续？'))return;
+  act(async()=>{await api().Configure(value);if(initialSetup)await api().Start();});
+};
 $('autostart').onchange=e=>act(()=>api().SetAutostart(e.target.checked));
 $('keep-awake').onchange=e=>act(()=>api().SetKeepAwake(e.target.checked));
 $('copy-code').onclick=()=>act(()=>window.runtime.ClipboardSetText(state.linkCode));

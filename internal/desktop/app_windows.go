@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -136,19 +138,64 @@ func (a *App) GetState() State {
 func (a *App) Configure(relayURL string) error {
 	a.op.Lock()
 	defer a.op.Unlock()
-	if _, err := a.store.LoadConfig(); err == nil {
-		return errors.New("已存在电脑配置，将继续使用原有配对信息")
+	relayURL = strings.TrimSpace(relayURL)
+	u, err := url.Parse(relayURL)
+	if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") || u.Hostname() == "" || u.Fragment != "" {
+		return errors.New("请输入完整的 ws:// 或 wss:// 服务器地址，例如 ws://43.155.135.230:8080/ws")
 	}
-	_, _, err := a.store.Initialize(relayURL)
+	config, err := a.store.LoadConfig()
+	if errors.Is(err, os.ErrNotExist) {
+		_, _, err = a.store.Initialize(relayURL)
+		if err != nil {
+			a.recordError(err)
+		}
+		return err
+	}
 	if err != nil {
-		a.recordError(err)
+		return err
 	}
-	return err
+	if config.RelayURL == relayURL {
+		return nil
+	}
+	a.mu.Lock()
+	wasRunning := a.cancel != nil
+	a.mu.Unlock()
+	if err := a.stop(); err != nil {
+		return err
+	}
+	// Read again after shutdown so the final pairing and project updates are kept.
+	config, err = a.store.LoadConfig()
+	if err == nil {
+		config.RelayURL = relayURL
+		config.Pairing = nil
+		config.Pending = map[string]agent.PendingClient{}
+		err = a.store.Save(config)
+	}
+	if err != nil {
+		if wasRunning {
+			if restartErr := a.start(); restartErr != nil {
+				err = errors.Join(err, restartErr)
+			}
+		}
+		return err
+	}
+	a.mu.Lock()
+	a.lastError = ""
+	a.mu.Unlock()
+	if wasRunning {
+		return a.start()
+	}
+	return nil
 }
 
 func (a *App) Start() error {
 	a.op.Lock()
 	defer a.op.Unlock()
+	return a.start()
+}
+
+// start and stop are called with op held to serialize configuration and lifecycle changes.
+func (a *App) start() error {
 	a.mu.Lock()
 	if a.cancel != nil {
 		a.mu.Unlock()
@@ -247,6 +294,10 @@ func (a *App) supervise(ctx context.Context, done chan struct{}) {
 func (a *App) Stop() error {
 	a.op.Lock()
 	defer a.op.Unlock()
+	return a.stop()
+}
+
+func (a *App) stop() error {
 	a.mu.Lock()
 	cancel, done := a.cancel, a.done
 	if cancel != nil {
@@ -266,10 +317,12 @@ func (a *App) Stop() error {
 }
 
 func (a *App) Restart() error {
-	if err := a.Stop(); err != nil {
+	a.op.Lock()
+	defer a.op.Unlock()
+	if err := a.stop(); err != nil {
 		return err
 	}
-	return a.Start()
+	return a.start()
 }
 
 func (a *App) RefreshPairing() error {
