@@ -59,7 +59,12 @@ internal fun DirectoryBrowserScreen(state: UiState, model: MainViewModel) {
         contentWindowInsets = WindowInsets.navigationBars,
         topBar = {
             TopAppBar(
-                title = { Text("选择电脑目录") },
+                title = {
+                    Column {
+                        Text("选择电脑目录")
+                        ConnectionLabel(state.connection, state.remoteAvailability)
+                    }
+                },
                 navigationIcon = { IconButton(onClick = model::closeDirectories) { Icon(Icons.Default.ArrowBack, "返回主界面") } },
                 actions = {
                     IconButton(onClick = { model.browseDirectory(browser.path) }, enabled = !busy && connected) {

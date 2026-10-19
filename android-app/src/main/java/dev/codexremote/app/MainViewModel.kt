@@ -28,6 +28,7 @@ data class UiState(
     val setupRequired: Boolean = true,
     val connection: RemoteClient.ConnectionStatus = RemoteClient.ConnectionStatus.DISCONNECTED,
     val connectionDetail: String = "",
+    val remoteAvailability: RemoteAvailability = RemoteAvailability.CHECKING,
     val paired: Boolean = false,
     val projects: List<ProjectUi> = emptyList(),
     val threads: List<ThreadUi> = emptyList(),
@@ -379,6 +380,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
             val disconnected = status == RemoteClient.ConnectionStatus.ERROR || status == RemoteClient.ConnectionStatus.DISCONNECTED
             it.copy(
                 connection = status,
+                remoteAvailability = RemoteAvailability.CHECKING,
                 connectionDetail = detail,
                 pairingBusy = if (disconnected) false else it.pairingBusy,
                 error = if (disconnected) UserFacingError.connectionUnavailable() else it.error,
@@ -466,6 +468,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
 
     override fun onEvent(kind: String, payload: JSONObject) {
         when (kind) {
+            "remote.presence" -> update {
+                if (it.connection != RemoteClient.ConnectionStatus.CONNECTED) it
+                else it.copy(remoteAvailability = if (payload.optBoolean("online")) RemoteAvailability.ENABLED else RemoteAvailability.DISABLED)
+            }
             "transfer.progress" -> update {
                 if (it.loadingThread) it.copy(threadLoadProgress = payload.optInt("percent")) else it
             }
