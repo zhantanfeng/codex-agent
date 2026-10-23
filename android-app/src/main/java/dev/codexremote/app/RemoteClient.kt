@@ -80,6 +80,8 @@ class RemoteClient(
     private var pairingTimeout: Timer? = null
     private var reconnectTimer: Timer? = null
     private var responseTimer: Timer? = null
+    private var presenceTimer: Timer? = null
+    @Volatile private var lastHostResponseMs = 0L
     private var reconnectDelayMs = 1_000L
     @Volatile private var connectionGeneration = 0
     private var shouldReconnect = false
@@ -122,6 +124,7 @@ class RemoteClient(
         shouldReconnect = true
         reconnectTimer?.cancel()
         responseTimer?.cancel()
+        presenceTimer?.cancel()
         pairingTimer?.cancel()
         pairingTimeout?.cancel()
         connectionGeneration += 1
@@ -168,6 +171,24 @@ class RemoteClient(
                     }
                 }
                 listener.onConnection(ConnectionStatus.CONNECTED)
+                lastHostResponseMs = System.nanoTime() / 1_000_000
+                presenceTimer = fixedRateTimer("computer-presence", daemon = true, initialDelay = 0, period = 5_000) {
+                    if (generation != connectionGeneration) return@fixedRateTimer
+                    if (!paired) {
+                        lastHostResponseMs = System.nanoTime() / 1_000_000
+                        return@fixedRateTimer
+                    }
+                    val now = System.nanoTime() / 1_000_000
+                    if (now - lastHostResponseMs >= 10_000) {
+                        listener.onEvent("remote.presence", JSONObject().put("online", false))
+                    }
+                    // Reuse an existing read-only command so older Agents and
+                    // Relays work too. The response is not a user operation.
+                    sendEnvelope("command", JSONObject()
+                        .put("requestId", "presence-${UUID.randomUUID()}")
+                        .put("action", "projects.list")
+                        .put("data", JSONObject()))
+                }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -177,6 +198,8 @@ class RemoteClient(
                     require(envelope.senderId == current.hostId)
                     require(envelope.targetId == identity.clientId || envelope.targetId == "*")
                     codec.verify(envelope, parsePublicKey(current.hostPublicKey))
+                    lastHostResponseMs = System.nanoTime() / 1_000_000
+                    listener.onEvent("remote.presence", JSONObject().put("online", true))
                     val payload = envelope.decodedPayload()
                     if (envelope.kind == "transfer.chunk") {
                         val requestId = payload.optString("requestId")
@@ -225,6 +248,7 @@ class RemoteClient(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (generation != connectionGeneration) return
                 responseTimer?.cancel()
+                presenceTimer?.cancel()
                 failAwaited("relay is not connected")
                 pending.clear()
                 transfers.clear()
@@ -235,6 +259,7 @@ class RemoteClient(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (generation != connectionGeneration) return
                 responseTimer?.cancel()
+                presenceTimer?.cancel()
                 failAwaited("relay is not connected")
                 pending.clear()
                 transfers.clear()
@@ -250,6 +275,7 @@ class RemoteClient(
         connectionGeneration += 1
         reconnectTimer?.cancel()
         responseTimer?.cancel()
+        presenceTimer?.cancel()
         failAwaited("relay is not connected")
         pending.clear()
         transfers.clear()

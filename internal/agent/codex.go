@@ -41,6 +41,7 @@ type CodexClient struct {
 	done       chan error
 	closeOnce  sync.Once
 	closeErr   error
+	alive      atomic.Bool
 }
 
 const supportedCodexVersionDescription = "0.156.0 or newer"
@@ -70,7 +71,9 @@ func StartCodex(ctx context.Context, command string, log *slog.Logger, onMessage
 	if err != nil {
 		return nil, err
 	}
-	versionOutput, err := exec.CommandContext(ctx, executable, "--version").CombinedOutput()
+	versionCommand := exec.CommandContext(ctx, executable, "--version")
+	configureChildProcess(versionCommand)
+	versionOutput, err := versionCommand.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("check Codex CLI version: %w: %s", err, strings.TrimSpace(string(versionOutput)))
 	}
@@ -79,6 +82,7 @@ func StartCodex(ctx context.Context, command string, log *slog.Logger, onMessage
 		return nil, fmt.Errorf("unsupported Codex CLI %q; this build requires %s", version, supportedCodexVersionDescription)
 	}
 	cmd := exec.CommandContext(ctx, executable, "app-server", "--stdio")
+	configureChildProcess(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -97,7 +101,12 @@ func StartCodex(ctx context.Context, command string, log *slog.Logger, onMessage
 	}
 	go client.read(stdout)
 	go client.readLogs(stderr)
-	go func() { client.done <- cmd.Wait() }()
+	client.alive.Store(true)
+	go func() {
+		err := cmd.Wait()
+		client.alive.Store(false)
+		client.done <- err
+	}()
 	initCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	var initialized map[string]any

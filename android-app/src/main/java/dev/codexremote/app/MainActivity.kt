@@ -285,7 +285,7 @@ private fun HomeScreen(state: UiState, model: MainViewModel) {
                 title = {
                     Column {
                         Text("Codex Remote", fontWeight = FontWeight.SemiBold)
-                        ConnectionLabel(state.connection)
+                        ConnectionLabel(state.connection, state.remoteAvailability)
                     }
                 },
                 actions = {
@@ -383,6 +383,7 @@ private fun ConversationScreen(state: UiState, model: MainViewModel) {
                     Column {
                         Text(thread.title, style = MaterialTheme.typography.titleMedium, maxLines = 1)
                         Text(thread.cwd, style = MaterialTheme.typography.labelSmall, color = Muted, maxLines = 1)
+                        ConnectionLabel(state.connection, state.remoteAvailability)
                     }
                 },
                 actions = {
@@ -663,11 +664,16 @@ private fun ApprovalDialog(approval: ApprovalUi, model: MainViewModel) {
 }
 
 @Composable
-private fun ConnectionLabel(status: RemoteClient.ConnectionStatus) {
+internal fun ConnectionLabel(status: RemoteClient.ConnectionStatus, remote: RemoteAvailability) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        StatusDot(status == RemoteClient.ConnectionStatus.CONNECTED)
+        StatusDot(status == RemoteClient.ConnectionStatus.CONNECTED && remote == RemoteAvailability.ENABLED)
         Spacer(Modifier.width(6.dp))
-        Text(status.name.lowercase().replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.labelSmall, color = Muted)
+        Text(when (status) {
+            RemoteClient.ConnectionStatus.CONNECTED -> remote.label
+            RemoteClient.ConnectionStatus.CONNECTING -> "正在连接服务器"
+            RemoteClient.ConnectionStatus.DISCONNECTED -> "服务器未连接"
+            RemoteClient.ConnectionStatus.ERROR -> "服务器连接异常"
+        }, style = MaterialTheme.typography.labelSmall, color = Muted)
     }
 }
 
