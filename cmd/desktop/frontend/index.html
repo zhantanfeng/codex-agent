@@ -9,7 +9,7 @@
   <button class="nav" data-page="server"><span>⚙</span>服务器设置</button>
   <button class="nav" data-page="devices"><span>▣</span>已配对设备</button>
   <button class="nav" data-page="logs"><span>≡</span>运行日志</button>
-  <div class="sidebar-bottom"><span class="dot" id="side-dot"></span><span id="side-status">正在加载…</span><small>Windows · v0.1.0</small></div>
+  <div class="sidebar-bottom"><span class="dot" id="side-dot"></span><span id="side-status">正在加载…</span><small id="platform">dcode Desktop</small></div>
 </aside>
 <main>
   <header><div><div class="eyebrow">你的电脑，随时接续</div><h1 id="page-title">连接与配对</h1></div><button id="quit" class="quiet">退出软件</button></header>
@@ -17,8 +17,8 @@
   <section id="overview" class="page">
     <div class="card connection"><div class="row spread"><div class="row"><span id="hero-dot" class="hero-dot"></span><div><h2 id="hero-title">正在读取电脑状态</h2><p id="hero-description">无需保持终端窗口开启</p></div></div><div class="row"><button id="restart">重启</button><button id="toggle" class="primary">启动后台</button></div></div><div class="status-grid"><div><label>Codex</label><strong id="codex-status">—</strong></div><div><label>中转服务器</label><strong id="relay-status">—</strong></div><div><label>手机设备</label><strong id="phone-status">—</strong></div></div><div id="relay-address" class="address"></div></div>
     <div class="pair-layout"><div class="card pairing"><div class="row spread"><h2>连接手机</h2><button id="refresh-code" class="quiet">刷新配对码 ↻</button></div><p>在手机 dcode 中输入六位连接码</p><div id="code" class="code">— — — — — —</div><div class="row spread"><span id="expires" class="muted">启动后台后获取配对码</span><button id="copy-code" class="quiet" disabled>复制</button></div><div class="divider"></div><p class="footnote">已配对的手机直接打开 App 即可，无需重复输入。</p></div><div class="card qr-card"><h2>也可以扫码连接</h2><div id="qr-placeholder" class="qr-placeholder">连接后显示二维码</div><img id="qr" alt="手机配对二维码" hidden><span class="muted">使用 dcode App 扫码</span></div></div>
-    <div class="card settings"><div class="setting"><div><h3>登录 Windows 后自动启动</h3><p>自动连接并缩到系统托盘</p></div><input type="checkbox" id="autostart" role="switch" aria-label="登录后自动启动"></div><div class="setting"><div><h3>运行期间保持电脑唤醒 <span class="tag">可选</span></h3><p>防止自动睡眠，屏幕仍可关闭；停止后台后恢复</p></div><input type="checkbox" id="keep-awake" role="switch" aria-label="运行期间保持唤醒"></div><p id="awake-status" class="footnote"></p></div>
-    <p class="bottom-note">关闭窗口后继续在托盘运行 · 退出软件会断开手机连接</p>
+    <div class="card settings"><div class="setting"><div><h3>登录电脑后自动启动</h3><p id="autostart-description">自动连接并缩到系统托盘</p></div><input type="checkbox" id="autostart" role="switch" aria-label="登录后自动启动"></div><div class="setting"><div><h3>运行期间保持电脑唤醒 <span class="tag">可选</span></h3><p>防止自动睡眠，屏幕仍可关闭；停止后台后恢复</p></div><input type="checkbox" id="keep-awake" role="switch" aria-label="运行期间保持唤醒"></div><p id="awake-status" class="footnote"></p></div>
+    <p id="background-note" class="bottom-note">关闭窗口后继续在后台运行 · 退出软件会断开手机连接</p>
   </section>
   <section id="server" class="page" hidden>
     <div class="card server-settings">
@@ -32,6 +32,6 @@
     </div>
   </section>
   <section id="devices" class="page" hidden><div class="card"><h2>已配对设备</h2><p>移除后，该手机需要重新配对才能访问电脑。</p><div id="device-list"></div></div></section>
-  <section id="logs" class="page" hidden><div class="card"><div class="row spread"><h2>后台运行日志</h2><span class="muted">最近 200 条 · 自动刷新</span></div><p>日志保存在本机 %LOCALAPPDATA%\CodexRemote\desktop.log</p><pre id="log-output">暂无日志</pre></div></section>
+  <section id="logs" class="page" hidden><div class="card"><div class="row spread"><h2>后台运行日志</h2><span class="muted">最近 200 条 · 自动刷新</span></div><p id="log-path">日志保存在本机</p><pre id="log-output">暂无日志</pre></div></section>
 </main><script src="app.js"></script>
 </body></html>

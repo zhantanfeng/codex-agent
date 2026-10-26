@@ -1,3 +1,5 @@
+//go:build windows || darwin
+
 package desktop
 
 import (
@@ -10,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +30,8 @@ type Preferences struct {
 }
 type State struct {
 	agent.Status
+	Platform    string   `json:"platform"`
+	LogPath     string   `json:"logPath"`
 	Configured  bool     `json:"configured"`
 	Running     bool     `json:"running"`
 	Stopping    bool     `json:"stopping"`
@@ -113,7 +118,7 @@ func (a *App) Quit() { a.quitting.Store(true); wr.Quit(a.ctx) }
 
 func (a *App) GetState() State {
 	a.mu.Lock()
-	s := State{Running: a.cancel != nil, Stopping: a.stopping, Error: a.lastError, KeepAwake: a.prefs.KeepAwake, Devices: []string{}}
+	s := State{Platform: runtime.GOOS, LogPath: filepath.Join(a.store.Dir, "desktop.log"), Running: a.cancel != nil, Stopping: a.stopping, Error: a.lastError, KeepAwake: a.prefs.KeepAwake, Devices: []string{}}
 	r := a.runtime
 	a.mu.Unlock()
 	if r != nil {

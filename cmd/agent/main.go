@@ -11,14 +11,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"codexremote/internal/agent"
+	"codexremote/internal/macos"
 	"codexremote/internal/protocol"
 	qrcode "github.com/skip2/go-qrcode"
 )
@@ -28,6 +27,7 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	macos.PrepareEnvironment()
 	store, err := agent.DefaultStore()
 	if err != nil {
 		fatal(err)
@@ -73,7 +73,13 @@ func main() {
 		}
 		fmt.Printf("Host: %s\nRelay: %s\nProjects: %d\nPaired clients: %d\n", config.HostID, config.RelayURL, len(config.Projects), len(config.Clients))
 	case "install":
-		install()
+		if err := installAutostart(); err != nil {
+			fatal(err)
+		}
+	case "uninstall":
+		if err := uninstallAutostart(); err != nil {
+			fatal(err)
+		}
 	default:
 		usage()
 		os.Exit(2)
@@ -192,21 +198,6 @@ func pair(store *agent.Store) {
 	fatal(errors.New("pairing window expired"))
 }
 
-func install() {
-	executable, err := os.Executable()
-	if err != nil {
-		fatal(err)
-	}
-	executable, _ = filepath.Abs(executable)
-	taskCommand := fmt.Sprintf("\"%s\" run", executable)
-	cmd := exec.Command("schtasks.exe", "/Create", "/SC", "ONLOGON", "/TN", "CodexRemoteAgent", "/TR", taskCommand, "/F")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fatal(fmt.Errorf("install scheduled task: %w: %s", err, output))
-	}
-	fmt.Print(string(output))
-}
-
 func device(store *agent.Store, args []string) {
 	if len(args) == 0 {
 		fatal(errors.New("device requires list or revoke"))
@@ -238,7 +229,7 @@ func device(store *agent.Store, args []string) {
 }
 
 func usage() {
-	fmt.Println("Usage: codex-remote <init|run|project|pair|device|status|install>")
+	fmt.Println("Usage: codex-remote <init|run|project|pair|device|status|install|uninstall>")
 }
 
 func fatal(err error) {

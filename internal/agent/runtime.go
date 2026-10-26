@@ -339,7 +339,7 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 			var ok bool
 			path, ok = config.Projects[data.ProjectID]
 			if !ok {
-				return nil, errors.New("project is not in the Windows allowlist")
+				return nil, errors.New("project is not in the computer's allowlist")
 			}
 		}
 		var result map[string]any

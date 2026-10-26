@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -43,7 +44,10 @@ type Store struct {
 }
 
 func DefaultStore() (*Store, error) {
-	base := os.Getenv("LOCALAPPDATA")
+	var base string
+	if runtime.GOOS == "windows" {
+		base = os.Getenv("LOCALAPPDATA")
+	}
 	if base == "" {
 		userConfig, err := os.UserConfigDir()
 		if err != nil {
