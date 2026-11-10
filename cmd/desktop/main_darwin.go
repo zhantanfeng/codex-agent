@@ -1,5 +1,10 @@
 package main
 
+// Wails' macOS file dialogs use UTType from UniformTypeIdentifiers.
+
+// #cgo LDFLAGS: -framework UniformTypeIdentifiers
+import "C"
+
 import (
 	"embed"
 	"fmt"
@@ -36,11 +41,12 @@ func main() {
 	frontend, _ := fs.Sub(assets, "frontend")
 	err = wails.Run(&options.App{
 		Title: "dcode", Width: 1060, Height: 790, MinWidth: 840, MinHeight: 650,
-		StartHidden:      len(os.Args) > 1 && os.Args[1] == "--hidden",
-		BackgroundColour: options.NewRGB(246, 247, 244),
-		AssetServer:      &assetserver.Options{Assets: frontend},
-		Menu:             appMenu,
-		OnStartup:        app.Startup, OnBeforeClose: app.BeforeClose, OnShutdown: app.Shutdown,
+		StartHidden:       len(os.Args) > 1 && os.Args[1] == "--hidden",
+		HideWindowOnClose: true,
+		BackgroundColour:  options.NewRGB(246, 247, 244),
+		AssetServer:       &assetserver.Options{Assets: frontend},
+		Menu:              appMenu,
+		OnStartup:         app.Startup, OnBeforeClose: app.BeforeClose, OnShutdown: app.Shutdown,
 		Bind:               []interface{}{app},
 		SingleInstanceLock: &options.SingleInstanceLock{UniqueId: "3b189975-c789-4c02-bd18-909e9f0499f1", OnSecondInstanceLaunch: func(options.SecondInstanceData) { app.Show() }},
 		Mac:                &mac.Options{TitleBar: mac.TitleBarDefault()},

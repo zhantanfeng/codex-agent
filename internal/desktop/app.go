@@ -94,7 +94,8 @@ func (a *App) Startup(ctx context.Context) {
 }
 
 func (a *App) BeforeClose(ctx context.Context) bool {
-	if a.quitting.Load() || !a.trayReady.Load() {
+	// macOS hides closed windows natively; this callback also handles Dock quit requests.
+	if runtime.GOOS == "darwin" || a.quitting.Load() || !a.trayReady.Load() {
 		return false
 	}
 	wr.WindowHide(ctx)
@@ -115,6 +116,20 @@ func (a *App) Show() {
 	}
 }
 func (a *App) Quit() { a.quitting.Store(true); wr.Quit(a.ctx) }
+
+func (a *App) RequestQuit() error {
+	button, err := wr.MessageDialog(a.ctx, wr.MessageDialogOptions{
+		Type: wr.QuestionDialog, Title: "退出 dcode", Message: "退出后手机将无法连接电脑，确定退出？",
+		Buttons: []string{"退出", "取消"}, DefaultButton: "取消", CancelButton: "取消",
+	})
+	if err != nil {
+		return err
+	}
+	if button == "退出" {
+		a.Quit()
+	}
+	return nil
+}
 
 func (a *App) GetState() State {
 	a.mu.Lock()

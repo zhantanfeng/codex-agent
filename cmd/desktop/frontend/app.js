@@ -93,5 +93,5 @@ $('server-form').onsubmit=e=>{
 $('autostart').onchange=e=>act(()=>api().SetAutostart(e.target.checked));
 $('keep-awake').onchange=e=>act(()=>api().SetKeepAwake(e.target.checked));
 $('copy-code').onclick=()=>act(()=>window.runtime.ClipboardSetText(state.linkCode));
-$('quit').onclick=()=>{if(window.confirm('退出后手机将无法连接电脑，确定退出？'))api().Quit();};
+$('quit').onclick=()=>act(()=>api().RequestQuit());
 poll();setInterval(poll,1200);
