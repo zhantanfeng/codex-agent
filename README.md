@@ -1,6 +1,6 @@
 # Codex Remote
 
-Codex Remote lets an Android phone control Codex running on a Windows computer. The Windows Agent owns the Codex process and project files. A small public Relay forwards signed WebSocket frames between the phone and the Agent.
+Codex Remote lets an Android phone control Codex running on Windows or an Apple Silicon Mac. The local Agent owns the Codex process and project files. A small public Relay forwards signed WebSocket frames between the phone and the Agent.
 
 > [!WARNING]
 > This MVP intentionally uses plaintext `ws://` transport. Ed25519 signatures prevent command forgery, modification, and replay, but they do not hide prompts, source code, paths, or output. Do not use it with sensitive repositories. Do not expose the Relay as a long-term production service without adding TLS.
@@ -8,7 +8,8 @@ Codex Remote lets an Android phone control Codex running on a Windows computer. 
 ## Components
 
 - `cmd/relay`: stateless Go WebSocket relay for a public Linux server.
-- `cmd/agent`: Windows CLI/Agent that runs `codex app-server --stdio`.
+- `cmd/agent`: Windows/macOS CLI/Agent that runs `codex app-server --stdio`.
+- `cmd/desktop`: native Windows/macOS desktop interface.
 - `android-app`: Android 12+ Compose client.
 - `internal/protocol`: signed envelope and replay protection shared by the Go services.
 
@@ -89,6 +90,12 @@ bin\codex-remote.exe install
 
 Double-click `bin/dcode-desktop.exe` to run the Agent with a desktop interface and system tray. It reuses existing pairing and projects, shows six-digit pairing codes and QR codes, and supports login startup, optional keep-awake, device revocation, and local logs. Stop any older command-line `run` process first. See [desktop usage and build instructions](docs/desktop.md).
 
+## Apple Silicon macOS
+
+Run `powershell -File scripts/build-macos.ps1` on Windows to build `bin/dcode-0.1.14-macos-arm64.tar.gz`. Extract it on a Mac and open `start.command`, or run the included `codex-remote` CLI from Terminal. The Mac generates its own identity in the current user's Keychain and requires a fresh phone pairing. Configuration is stored under `~/Library/Application Support/CodexRemote`.
+
+The native desktop source uses Cocoa/WebKit and must be built on macOS with `bash scripts/build-desktop-macos.sh`; it outputs `bin/dcode.app`. See [Mac setup and build instructions](docs/macos.md) for login startup, permissions, and verification limits.
+
 ## Browse computer directories
 
 With Agent and Android `0.1.13` or newer, tap **浏览电脑目录 / 新建会话** on the phone. Browse the computer's drives and folders, go up a level, or enter an absolute Windows path. Tap **在此目录新建会话** to create a session in that folder, including an empty folder. Only folders are listed, one level at a time, with pagination; no file contents are fetched. Access uses the Windows account running the Agent. Inaccessible, missing, or disconnected directories show an error and can be retried.
@@ -109,15 +116,15 @@ Device revocation and project changes take effect on the next phone message with
 
 ## Runtime Behavior
 
-- The phone can only list and open threads whose working directory exactly matches a Windows project allowlist entry.
-- Codex credentials never leave Windows.
+- The phone can only list and open threads whose working directory exactly matches the computer's project allowlist entry.
+- Codex credentials never leave the computer.
 - The Agent inherits the existing Codex sandbox and approval policy.
 - Approval prompts are sent to the phone and resolved against the original app-server request ID.
 - A second message sent during an active turn is queued by the Agent. The **Steer** action explicitly redirects the active turn.
 - A session owned by another Codex client opens with readable history and disabled input. Retry after closing it in the other client to acquire write access. Refreshing a read-only session reads the latest persisted history without interrupting the writer.
 - The Agent buffers the latest 500 Codex events in memory. A reconnecting phone asks for events after its last event ID.
 - The Relay rejects invalid signatures, timestamps outside the allowed window, and duplicate/out-of-order sequence numbers.
-- Private keys are protected with Windows DPAPI and an Android Keystore AES key. Message bodies remain plaintext by design in this version.
+- Private keys are protected with Windows DPAPI, macOS Keychain, or an Android Keystore AES key. Message bodies remain plaintext by design in this version.
 
 ## Image attachments
 

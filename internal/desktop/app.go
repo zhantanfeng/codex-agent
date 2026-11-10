@@ -1,3 +1,5 @@
+//go:build windows || darwin
+
 package desktop
 
 import (
@@ -10,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +30,8 @@ type Preferences struct {
 }
 type State struct {
 	agent.Status
+	Platform    string   `json:"platform"`
+	LogPath     string   `json:"logPath"`
 	Configured  bool     `json:"configured"`
 	Running     bool     `json:"running"`
 	Stopping    bool     `json:"stopping"`
@@ -89,7 +94,8 @@ func (a *App) Startup(ctx context.Context) {
 }
 
 func (a *App) BeforeClose(ctx context.Context) bool {
-	if a.quitting.Load() || !a.trayReady.Load() {
+	// macOS hides closed windows natively; this callback also handles Dock quit requests.
+	if runtime.GOOS == "darwin" || a.quitting.Load() || !a.trayReady.Load() {
 		return false
 	}
 	wr.WindowHide(ctx)
@@ -111,9 +117,23 @@ func (a *App) Show() {
 }
 func (a *App) Quit() { a.quitting.Store(true); wr.Quit(a.ctx) }
 
+func (a *App) RequestQuit() error {
+	button, err := wr.MessageDialog(a.ctx, wr.MessageDialogOptions{
+		Type: wr.QuestionDialog, Title: "退出 dcode", Message: "退出后手机将无法连接电脑，确定退出？",
+		Buttons: []string{"退出", "取消"}, DefaultButton: "取消", CancelButton: "取消",
+	})
+	if err != nil {
+		return err
+	}
+	if button == "退出" {
+		a.Quit()
+	}
+	return nil
+}
+
 func (a *App) GetState() State {
 	a.mu.Lock()
-	s := State{Running: a.cancel != nil, Stopping: a.stopping, Error: a.lastError, KeepAwake: a.prefs.KeepAwake, Devices: []string{}}
+	s := State{Platform: runtime.GOOS, LogPath: filepath.Join(a.store.Dir, "desktop.log"), Running: a.cancel != nil, Stopping: a.stopping, Error: a.lastError, KeepAwake: a.prefs.KeepAwake, Devices: []string{}}
 	r := a.runtime
 	a.mu.Unlock()
 	if r != nil {

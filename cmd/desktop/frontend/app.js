@@ -25,6 +25,11 @@ async function act(fn){
 function text(id,value){$(id).textContent=value;}
 async function render(s){
   state=s;
+  const mac=s.platform==='darwin';
+  text('platform',mac?'macOS · Apple Silicon':'Windows');
+  text('autostart-description',mac?'登录后自动连接并在后台运行':'自动连接并缩到系统托盘');
+  text('background-note',mac?'关闭窗口后继续在后台运行 · 从 dcode 菜单选择“显示主窗口”重新打开':'关闭窗口后继续在托盘运行 · 退出软件会断开手机连接');
+  text('log-path','日志保存在本机 '+s.logPath);
   const online=s.codexOnline&&s.relayOnline;
   const title=s.stopping?'正在停止后台':online?'电脑已就绪':s.running?'正在连接…':'后台已停止';
   text('hero-title',title);text('side-status',title);
@@ -88,5 +93,5 @@ $('server-form').onsubmit=e=>{
 $('autostart').onchange=e=>act(()=>api().SetAutostart(e.target.checked));
 $('keep-awake').onchange=e=>act(()=>api().SetKeepAwake(e.target.checked));
 $('copy-code').onclick=()=>act(()=>window.runtime.ClipboardSetText(state.linkCode));
-$('quit').onclick=()=>{if(window.confirm('退出后手机将无法连接电脑，确定退出？'))api().Quit();};
+$('quit').onclick=()=>act(()=>api().RequestQuit());
 poll();setInterval(poll,1200);

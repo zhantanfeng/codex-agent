@@ -3,6 +3,7 @@
 .android-sdk/
 .gradle/
 .idea/
+.DS_Store
 local.properties
 **/build/
 bin/
