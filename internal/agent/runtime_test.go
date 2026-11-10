@@ -91,6 +91,49 @@ func TestCommandCancellationFollowsAgentShutdown(t *testing.T) {
 	}
 }
 
+func TestPhoneHeartbeatAndRecoveryDoNotWaitForBusyCodexCommand(t *testing.T) {
+	runtime := &Runtime{
+		config:    &Config{Projects: map[string]string{"demo": `D:\demo`}},
+		events:    []eventPayload{{EventID: 7, Method: "turn/started"}},
+		approvals: map[string]CodexMessage{},
+	}
+	// A slow Codex call holds this lock; the phone still needs its presence
+	// replies and buffered events while the turn continues to run.
+	runtime.commandMu.Lock()
+	defer runtime.commandMu.Unlock()
+	for _, action := range []string{"projects.list", "events.sync"} {
+		t.Run(action, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan any, 1)
+			go func() {
+				result, err := runtime.execute(ctx, commandPayload{Action: action, Data: json.RawMessage(`{"after":6}`)})
+				if err != nil {
+					done <- err
+					return
+				}
+				done <- result
+			}()
+			select {
+			case result := <-done:
+				if action == "projects.list" {
+					projects, ok := result.(map[string]string)
+					if !ok || projects["demo"] != `D:\demo` {
+						t.Fatalf("invalid heartbeat reply: %#v", result)
+					}
+				} else {
+					recovery, ok := result.(map[string]any)
+					if !ok || len(recovery["events"].([]eventPayload)) != 1 {
+						t.Fatalf("missing recovered events: %#v", result)
+					}
+				}
+			case <-time.After(time.Second):
+				t.Fatal("phone heartbeat/recovery blocked behind a busy Codex command")
+			}
+		})
+	}
+}
+
 func TestTurnIsQueuedWhenThreadIsActive(t *testing.T) {
 	runtime := &Runtime{
 		config:      &Config{Projects: map[string]string{"demo": `D:\demo`}},

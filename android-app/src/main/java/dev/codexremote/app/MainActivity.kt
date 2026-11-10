@@ -84,6 +84,7 @@ import androidx.compose.material3.TooltipBox
 import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -95,6 +96,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.ImageBitmap
@@ -109,6 +111,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import java.text.DateFormat
@@ -151,26 +156,39 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun App(model: MainViewModel) {
     val state by model.state
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle, model) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) model.onForeground()
+            if (event == Lifecycle.Event.ON_STOP) model.onBackground()
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
     Surface(modifier = Modifier.fillMaxSize(), color = Canvas) {
-        when {
-            state.setupRequired || !state.paired -> SetupScreen(state, model)
-            state.directories.visible -> DirectoryBrowserScreen(state, model)
-            state.selectedThread != null -> ConversationScreen(state, model)
-            else -> HomeScreen(state, model)
+        // Surface propagates its full-screen minimum size to direct children.
+        // A Box lets the notice measure to its content above the conversation.
+        Box(Modifier.fillMaxSize()) {
+            when {
+                state.setupRequired || !state.paired -> SetupScreen(state, model)
+                state.directories.visible -> DirectoryBrowserScreen(state, model)
+                state.selectedThread != null -> ConversationScreen(state, model)
+                else -> HomeScreen(state, model)
+            }
+            state.error?.let {
+                ErrorBanner(
+                    error = it,
+                    canRetry = state.retryCommand != null || (state.draftImages.isNotEmpty() && state.threadLoaded && !state.sending && !it.reconnectRequired),
+                    canGoBack = state.selectedThread != null || state.directories.visible,
+                    onRetry = model::retry,
+                    onBack = { if (state.directories.visible) model.closeDirectories() else model.closeThread() },
+                    onReconnect = model::reconnect,
+                    onDismiss = model::dismissError,
+                )
+            }
+            state.approval?.let { ApprovalDialog(it, model) }
+            state.pairingCode?.let { PairingCodeDialog(it) }
         }
-        state.error?.let {
-            ErrorBanner(
-                error = it,
-                canRetry = state.retryCommand != null || (state.draftImages.isNotEmpty() && state.threadLoaded && !state.sending && !it.reconnectRequired),
-                canGoBack = state.selectedThread != null || state.directories.visible,
-                onRetry = model::retry,
-                onBack = { if (state.directories.visible) model.closeDirectories() else model.closeThread() },
-                onReconnect = model::reconnect,
-                onDismiss = model::dismissError,
-            )
-        }
-        state.approval?.let { ApprovalDialog(it, model) }
-        state.pairingCode?.let { PairingCodeDialog(it) }
     }
 }
 
@@ -365,6 +383,13 @@ private fun ThreadRow(thread: ThreadUi, onClick: () -> Unit) {
 private fun ConversationScreen(state: UiState, model: MainViewModel) {
     val input = state.draftText
     val thread = state.selectedThread ?: return
+    val view = LocalView.current
+    val waitingForReply = state.sending || (state.connection == RemoteClient.ConnectionStatus.CONNECTED && state.activeTurnId != null)
+    DisposableEffect(view, waitingForReply) {
+        val previous = view.keepScreenOn
+        if (waitingForReply) view.keepScreenOn = true
+        onDispose { view.keepScreenOn = previous }
+    }
     val imagePicker = rememberLauncherForActivityResult(PickMultipleVisualMedia(MAX_MESSAGE_IMAGES)) { model.addImages(it) }
     val canSend = state.canWriteThread && !state.sending && !state.preparingImages && !state.closingSession &&
         (input.isNotBlank() || state.draftImages.isNotEmpty())

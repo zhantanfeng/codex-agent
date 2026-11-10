@@ -10,3 +10,4 @@ bin/
 dist/
 *.apk
 *.aab
+/cmd/desktop/rsrc_windows_*.syso

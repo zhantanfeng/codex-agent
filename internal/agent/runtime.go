@@ -47,6 +47,7 @@ type Runtime struct {
 	linkCode        string
 	linkExpires     time.Time
 	lastPhone       time.Time
+	phoneSeen       map[string]time.Time
 }
 
 type queuedTurn struct {
@@ -159,6 +160,9 @@ func (r *Runtime) connect(ctx context.Context) error {
 		r.connMu.Lock()
 		if r.conn == conn {
 			r.conn = nil
+			r.statusMu.Lock()
+			r.phoneSeen = nil
+			r.statusMu.Unlock()
 		}
 		r.connMu.Unlock()
 		conn.Close()
@@ -212,9 +216,7 @@ func (r *Runtime) handleEnvelope(env protocol.Envelope) {
 		return
 	}
 	command.clientID = env.SenderID
-	r.statusMu.Lock()
-	r.lastPhone = time.Now()
-	r.statusMu.Unlock()
+	r.notePhone(env.SenderID, time.Now())
 	go r.handleCommand(env.SenderID, command)
 }
 
@@ -290,8 +292,18 @@ func pairingSAS(hostPublic, clientID, clientPublic, code string) string {
 }
 
 func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, error) {
-	// Directory browsing is read-only and must not block approvals or turns.
-	if command.Action == "directories.list" {
+	// Health checks and event recovery must keep working while a Codex call
+	// holds commandMu, including a long-running turn or history request.
+	switch command.Action {
+	case "projects.list":
+		return r.currentConfig().Projects, nil
+	case "events.sync":
+		var data struct {
+			After uint64 `json:"after"`
+		}
+		_ = json.Unmarshal(command.Data, &data)
+		return map[string]any{"events": r.eventsAfter(data.After), "approvals": r.pendingApprovals()}, nil
+	case "directories.list":
 		return listDirectories(ctx, command.Data)
 	}
 	r.commandMu.Lock()
@@ -301,8 +313,6 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 	switch command.Action {
 	case "image.begin", "image.chunk", "image.finish", "image.thumbnail":
 		return r.imageCommand(command)
-	case "projects.list":
-		return config.Projects, nil
 	case "threads.list":
 		paths := make([]string, 0, len(config.Projects))
 		for _, path := range config.Projects {
@@ -470,12 +480,6 @@ func (r *Runtime) execute(ctx context.Context, command commandPayload) (any, err
 			return nil, err
 		}
 		return nil, r.respondApproval(data.RequestID, data.Decision)
-	case "events.sync":
-		var data struct {
-			After uint64 `json:"after"`
-		}
-		_ = json.Unmarshal(command.Data, &data)
-		return map[string]any{"events": r.eventsAfter(data.After), "approvals": r.pendingApprovals()}, nil
 	default:
 		return nil, fmt.Errorf("unsupported action %q", command.Action)
 	}

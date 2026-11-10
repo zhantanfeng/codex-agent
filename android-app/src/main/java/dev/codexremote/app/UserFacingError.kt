@@ -4,6 +4,7 @@ data class UserFacingError(
     val message: String,
     val sessionInUse: Boolean = false,
     val reconnectRequired: Boolean = false,
+    val transportUnavailable: Boolean = false,
 ) {
     companion object {
         fun fromMessage(message: String): UserFacingError {
@@ -28,8 +29,9 @@ data class UserFacingError(
         }
 
         fun connectionUnavailable() = UserFacingError(
-            message = "手机与服务器的连接已断开。请检查网络，然后点击“重新连接”。",
+            message = "手机与服务器的连接已断开，正在自动重连。请检查网络，也可点击“重新连接”。",
             reconnectRequired = true,
+            transportUnavailable = true,
         )
     }
 }

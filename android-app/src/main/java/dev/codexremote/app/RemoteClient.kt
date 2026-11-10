@@ -2,6 +2,7 @@ package dev.codexremote.app
 
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -81,7 +82,8 @@ class RemoteClient(
     private var reconnectTimer: Timer? = null
     private var responseTimer: Timer? = null
     private var presenceTimer: Timer? = null
-    @Volatile private var lastHostResponseMs = 0L
+    private val health = ConnectionHealth()
+    private var connected = false
     private var reconnectDelayMs = 1_000L
     @Volatile private var connectionGeneration = 0
     private var shouldReconnect = false
@@ -129,14 +131,17 @@ class RemoteClient(
         pairingTimeout?.cancel()
         connectionGeneration += 1
         val generation = connectionGeneration
+        connected = false
         socket?.cancel()
         failAwaited("relay is not connected")
         pending.clear()
         transfers.clear()
         responseTimer = fixedRateTimer("command-timeout", daemon = true, initialDelay = 1_000, period = 1_000) {
-            if (generation == connectionGeneration) {
-                pending.expire(System.nanoTime() / 1_000_000).forEach { (requestId, command) ->
-                    failCommand(requestId, command, "Computer response timed out")
+            synchronized(this@RemoteClient) {
+                if (generation == connectionGeneration) {
+                    pending.expire(SystemClock.elapsedRealtime()).forEach { (requestId, command) ->
+                        failCommand(requestId, command, "Computer response timed out")
+                    }
                 }
             }
         }
@@ -145,72 +150,66 @@ class RemoteClient(
         val endpoint = "${current.relayUrl}${separator}role=client&host_id=${Uri.encode(current.hostId)}&client_id=${Uri.encode(identity.clientId)}"
         socket = http.newWebSocket(Request.Builder().url(endpoint).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                if (generation != connectionGeneration) return
-                reconnectDelayMs = 1_000L
-                sendEnvelope(
-                    "hello",
-                    JSONObject().put("publicKey", b64(identity.keyPair.public.encoded)),
-                )
-                if (!paired) {
+                synchronized(this@RemoteClient) {
+                    if (generation != connectionGeneration) return
+                    connected = true
+                    reconnectDelayMs = 1_000L
                     sendEnvelope(
-                        "pair.request",
-                        JSONObject()
-                            .put("code", current.code)
-                            .put("clientId", identity.clientId)
-                            .put("publicKey", b64(identity.keyPair.public.encoded)),
+                        "hello",
+                        JSONObject().put("publicKey", b64(identity.keyPair.public.encoded)),
                     )
-                    if (current.direct) {
-                        pairingTimeout = Timer("link-pairing-timeout", true).apply {
-                            schedule(30_000) {
-                                if (generation == connectionGeneration && !paired) {
-                                    disconnect()
-                                    listener.onPairingError("连接码配对未完成，可能已被使用或电脑已离线，请重新输入电脑端显示的连接码")
+                    if (!paired) {
+                        sendEnvelope(
+                            "pair.request",
+                            JSONObject()
+                                .put("code", current.code)
+                                .put("clientId", identity.clientId)
+                                .put("publicKey", b64(identity.keyPair.public.encoded)),
+                        )
+                        if (current.direct) {
+                            pairingTimeout = Timer("link-pairing-timeout", true).apply {
+                                schedule(30_000) {
+                                    synchronized(this@RemoteClient) {
+                                        if (generation == connectionGeneration && !paired) {
+                                            disconnect()
+                                            listener.onPairingError("连接码配对未完成，可能已被使用或电脑已离线，请重新输入电脑端显示的连接码")
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                listener.onConnection(ConnectionStatus.CONNECTED)
-                lastHostResponseMs = System.nanoTime() / 1_000_000
-                presenceTimer = fixedRateTimer("computer-presence", daemon = true, initialDelay = 0, period = 5_000) {
-                    if (generation != connectionGeneration) return@fixedRateTimer
-                    if (!paired) {
-                        lastHostResponseMs = System.nanoTime() / 1_000_000
-                        return@fixedRateTimer
+                    listener.onConnection(ConnectionStatus.CONNECTED)
+                    health.received(SystemClock.elapsedRealtime())
+                    presenceTimer = fixedRateTimer("computer-presence", daemon = true, initialDelay = 0, period = 5_000) {
+                        checkPresence(generation)
                     }
-                    val now = System.nanoTime() / 1_000_000
-                    if (now - lastHostResponseMs >= 10_000) {
-                        listener.onEvent("remote.presence", JSONObject().put("online", false))
-                    }
-                    // Reuse an existing read-only command so older Agents and
-                    // Relays work too. The response is not a user operation.
-                    sendEnvelope("command", JSONObject()
-                        .put("requestId", "presence-${UUID.randomUUID()}")
-                        .put("action", "projects.list")
-                        .put("data", JSONObject()))
                 }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                if (generation != connectionGeneration) return
-                runCatching {
-                    val envelope = SignedEnvelope.fromJson(JSONObject(text))
-                    require(envelope.senderId == current.hostId)
-                    require(envelope.targetId == identity.clientId || envelope.targetId == "*")
-                    codec.verify(envelope, parsePublicKey(current.hostPublicKey))
-                    lastHostResponseMs = System.nanoTime() / 1_000_000
-                    listener.onEvent("remote.presence", JSONObject().put("online", true))
-                    val payload = envelope.decodedPayload()
-                    if (envelope.kind == "transfer.chunk") {
-                        val requestId = payload.optString("requestId")
-                        pending.touch(requestId, System.nanoTime() / 1_000_000)
-                        listener.onEvent("transfer.progress", JSONObject().put("requestId", requestId)
-                            .put("percent", (payload.getInt("index") + 1) * 100 / payload.getInt("total")))
-                        transfers.accept(payload)?.let { handlePayload(it.kind, it.payload) }
-                    } else handlePayload(envelope.kind, payload)
-                }.onFailure {
-                    transfers.clear()
-                    listener.onConnection(ConnectionStatus.ERROR, it.message ?: "Invalid server message")
+                synchronized(this@RemoteClient) {
+                    if (generation != connectionGeneration) return
+                    runCatching {
+                        val envelope = SignedEnvelope.fromJson(JSONObject(text))
+                        require(envelope.senderId == current.hostId)
+                        require(envelope.targetId == identity.clientId || envelope.targetId == "*")
+                        codec.verify(envelope, parsePublicKey(current.hostPublicKey))
+                        health.received(SystemClock.elapsedRealtime())
+                        listener.onEvent("remote.presence", JSONObject().put("online", true))
+                        val payload = envelope.decodedPayload()
+                        if (envelope.kind == "transfer.chunk") {
+                            val requestId = payload.optString("requestId")
+                            pending.touch(requestId, SystemClock.elapsedRealtime())
+                            listener.onEvent("transfer.progress", JSONObject().put("requestId", requestId)
+                                .put("percent", (payload.getInt("index") + 1) * 100 / payload.getInt("total")))
+                            transfers.accept(payload)?.let { handlePayload(it.kind, it.payload) }
+                        } else handlePayload(envelope.kind, payload)
+                    }.onFailure {
+                        // Stale buffered frames after a long suspension must not
+                        // leave an open socket with an unusable conversation.
+                        connectionLost(generation, ConnectionStatus.ERROR, it.message ?: "Invalid server message")
+                    }
                 }
             }
 
@@ -227,13 +226,17 @@ class RemoteClient(
                             listener.onEvent(kind, payload)
                             pairingTimer?.cancel()
                             pairingTimer = fixedRateTimer("pair-retry", daemon = true, initialDelay = 2_000, period = 2_000) {
-                                sendEnvelope(
-                                    "pair.request",
-                                    JSONObject()
-                                        .put("code", current.code)
-                                        .put("clientId", identity.clientId)
-                                        .put("publicKey", b64(identity.keyPair.public.encoded)),
-                                )
+                                synchronized(this@RemoteClient) {
+                                    if (generation == connectionGeneration && !paired) {
+                                        sendEnvelope(
+                                            "pair.request",
+                                            JSONObject()
+                                                .put("code", current.code)
+                                                .put("clientId", identity.clientId)
+                                                .put("publicKey", b64(identity.keyPair.public.encoded)),
+                                        )
+                                    }
+                                }
                             }
                         }
                         "response" -> {
@@ -246,33 +249,77 @@ class RemoteClient(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                if (generation != connectionGeneration) return
-                responseTimer?.cancel()
-                presenceTimer?.cancel()
-                failAwaited("relay is not connected")
-                pending.clear()
-                transfers.clear()
-                listener.onConnection(ConnectionStatus.ERROR, t.message ?: "Connection failed")
-                scheduleReconnect(generation)
+                connectionLost(generation, ConnectionStatus.ERROR, t.message ?: "Connection failed")
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                // Acknowledge server-initiated closes so onClosed can run.
+                webSocket.close(code, reason)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (generation != connectionGeneration) return
-                responseTimer?.cancel()
-                presenceTimer?.cancel()
-                failAwaited("relay is not connected")
-                pending.clear()
-                transfers.clear()
-                listener.onConnection(ConnectionStatus.DISCONNECTED, reason)
-                if (code != 1000) scheduleReconnect(generation)
+                connectionLost(generation, ConnectionStatus.DISCONNECTED, reason)
             }
         })
+    }
+
+    @Synchronized
+    fun ensureConnected() {
+        if (shouldReconnect && health.needsForegroundReconnect(SystemClock.elapsedRealtime(), socket != null, connected)) {
+            connect()
+        } else if (shouldReconnect && connected) {
+            checkPresence(connectionGeneration)
+        }
+    }
+
+    fun onBackground() = health.backgrounded(SystemClock.elapsedRealtime())
+
+    @Synchronized
+    private fun checkPresence(generation: Int) {
+        if (generation != connectionGeneration || !connected || !paired) return
+        val now = SystemClock.elapsedRealtime()
+        if (health.isOffline(now)) {
+            listener.onEvent("remote.presence", JSONObject().put("online", false))
+        }
+        if (health.needsReconnect(now)) {
+            connectionLost(generation, ConnectionStatus.ERROR, "Computer response timed out")
+            return
+        }
+        // Keep compatibility with existing Agents and Relays. No model output
+        // or user command response is needed for this independent health check.
+        if (!sendEnvelope("command", JSONObject()
+                .put("requestId", "presence-${UUID.randomUUID()}")
+                .put("action", "projects.list")
+                .put("data", JSONObject()))) {
+            connectionLost(generation, ConnectionStatus.ERROR, "relay is not connected")
+        }
+    }
+
+    @Synchronized
+    private fun connectionLost(generation: Int, status: ConnectionStatus, detail: String) {
+        if (generation != connectionGeneration) return
+        // Invalidate callbacks and timers belonging to the old socket before
+        // scheduling a replacement, including normal server closes (1000).
+        connectionGeneration += 1
+        connected = false
+        responseTimer?.cancel()
+        presenceTimer?.cancel()
+        pairingTimer?.cancel()
+        pairingTimeout?.cancel()
+        socket?.cancel()
+        socket = null
+        failAwaited("relay is not connected")
+        pending.clear()
+        transfers.clear()
+        listener.onConnection(status, detail)
+        scheduleReconnect(connectionGeneration)
     }
 
     @Synchronized
     fun disconnect() {
         shouldReconnect = false
         connectionGeneration += 1
+        connected = false
         reconnectTimer?.cancel()
         responseTimer?.cancel()
         presenceTimer?.cancel()
@@ -292,7 +339,11 @@ class RemoteClient(
         val delay = reconnectDelayMs
         reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(30_000L)
         reconnectTimer = Timer("relay-reconnect", true).apply {
-            schedule(delay) { connect() }
+            schedule(delay) {
+                synchronized(this@RemoteClient) {
+                    if (shouldReconnect && generation == connectionGeneration) connect()
+                }
+            }
         }
     }
 
@@ -319,7 +370,7 @@ class RemoteClient(
 
     private fun dispatch(requestId: String, action: String, data: JSONObject) {
         val command = RemoteCommand.capture(action, data)
-        pending.add(requestId, command, System.nanoTime() / 1_000_000)
+        pending.add(requestId, command, SystemClock.elapsedRealtime())
         val sent = sendEnvelope(
             "command",
             JSONObject().put("requestId", requestId).put("action", action).put("data", data),

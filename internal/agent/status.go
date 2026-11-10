@@ -3,19 +3,51 @@ package agent
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 )
 
 var ErrAlreadyRunning = errors.New("电脑后台已在运行，请先退出另一个 dcode 桌面版或命令行 run 进程，再点击启动")
 
+// The phone sends a signed presence command every five seconds. Saved pairing
+// keys describe authorization, not the number of phones currently online.
+const phonePresenceWindow = 20 * time.Second
+
 // Status contains display information only; identity keys and bootstrap tokens
 // must never be exposed to a desktop renderer.
 type Status struct {
-	CodexOnline bool      `json:"codexOnline"`
-	RelayOnline bool      `json:"relayOnline"`
-	LinkCode    string    `json:"linkCode"`
-	LinkExpires time.Time `json:"linkExpires"`
-	LastPhone   time.Time `json:"lastPhone"`
+	CodexOnline   bool      `json:"codexOnline"`
+	RelayOnline   bool      `json:"relayOnline"`
+	LinkCode      string    `json:"linkCode"`
+	LinkExpires   time.Time `json:"linkExpires"`
+	LastPhone     time.Time `json:"lastPhone"`
+	OnlineDevices []string  `json:"onlineDevices"`
+}
+
+func (r *Runtime) notePhone(id string, now time.Time) {
+	r.statusMu.Lock()
+	defer r.statusMu.Unlock()
+	if r.phoneSeen == nil {
+		r.phoneSeen = make(map[string]time.Time)
+	}
+	r.phoneSeen[id] = now
+	r.lastPhone = now
+}
+
+func (r *Runtime) onlinePhones(now time.Time) []string {
+	config := r.currentConfig()
+	phones := []string{}
+	r.statusMu.Lock()
+	defer r.statusMu.Unlock()
+	for id, seen := range r.phoneSeen {
+		if _, authorized := config.Clients[id]; !authorized || now.Sub(seen) >= phonePresenceWindow {
+			delete(r.phoneSeen, id)
+			continue
+		}
+		phones = append(phones, id)
+	}
+	sort.Strings(phones)
+	return phones
 }
 
 func (r *Runtime) Status() Status {
@@ -32,6 +64,10 @@ func (r *Runtime) Status() Status {
 	r.connMu.Lock()
 	s.RelayOnline = r.conn != nil
 	r.connMu.Unlock()
+	s.OnlineDevices = []string{}
+	if s.RelayOnline {
+		s.OnlineDevices = r.onlinePhones(time.Now())
+	}
 	return s
 }
 

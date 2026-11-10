@@ -110,6 +110,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     }
 
     fun reconnect() = remote.connect()
+    fun onForeground() = remote.ensureConnected()
+    fun onBackground() = remote.onBackground()
     fun dismissError() = update { it.copy(error = null, retryCommand = null) }
     fun loadProjects() = remote.command("projects.list")
     fun loadThreads() = remote.command("threads.list")
@@ -376,24 +378,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     }
 
     override fun onConnection(status: RemoteClient.ConnectionStatus, detail: String) {
-        update {
-            val disconnected = status == RemoteClient.ConnectionStatus.ERROR || status == RemoteClient.ConnectionStatus.DISCONNECTED
-            it.copy(
-                connection = status,
-                remoteAvailability = RemoteAvailability.CHECKING,
-                connectionDetail = detail,
-                pairingBusy = if (disconnected) false else it.pairingBusy,
-                error = if (disconnected) UserFacingError.connectionUnavailable() else it.error,
-                closingSession = if (disconnected) false else it.closingSession,
-                threadLoaded = if (disconnected) false else it.threadLoaded,
-                loadingThread = if (disconnected) false else it.loadingThread,
-            )
-        }
-        if (status == RemoteClient.ConnectionStatus.CONNECTED && remote.paired) {
-            refresh()
-            if (state.value.selectedThread != null) {
-                update { it.copy(loadingThread = true, threadLoadProgress = 0) }
-                remote.command("thread.resume", JSONObject().put("threadId", state.value.selectedThread?.id))
+        onMain {
+            state.value = applyConnectionStatus(state.value, status, detail)
+            if (status == RemoteClient.ConnectionStatus.CONNECTED && remote.paired) {
+                refresh()
+                restoreOpenThread()
             }
         }
     }
@@ -468,9 +457,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
 
     override fun onEvent(kind: String, payload: JSONObject) {
         when (kind) {
-            "remote.presence" -> update {
-                if (it.connection != RemoteClient.ConnectionStatus.CONNECTED) it
-                else it.copy(remoteAvailability = if (payload.optBoolean("online")) RemoteAvailability.ENABLED else RemoteAvailability.DISABLED)
+            "remote.presence" -> onMain {
+                val wasOnline = state.value.remoteAvailability == RemoteAvailability.ENABLED
+                val online = payload.optBoolean("online")
+                state.value = applyRemotePresence(state.value, online)
+                if (online && !wasOnline && state.value.connection == RemoteClient.ConnectionStatus.CONNECTED) {
+                    restoreOpenThread()
+                }
             }
             "transfer.progress" -> update {
                 if (it.loadingThread) it.copy(threadLoadProgress = payload.optInt("percent")) else it
@@ -478,11 +471,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
             "pair.pending" -> update { it.copy(pairingCode = payload.optString("verificationCode")) }
             "codex.event" -> handleCodexEvent(payload)
             "codex.request" -> handleApproval(payload)
-            "host.status" -> if (payload.optBoolean("online")) {
-                refresh()
-                state.value.selectedThread?.takeIf { !state.value.threadLoaded }?.let {
-                    update { current -> current.copy(loadingThread = true, threadLoadProgress = 0) }
-                    remote.command("thread.resume", JSONObject().put("threadId", it.id))
+            "host.status" -> onMain {
+                if (payload.optBoolean("online")) {
+                    refresh()
+                    restoreOpenThread()
                 }
             }
         }
@@ -492,6 +484,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
         loadProjects()
         loadThreads()
         remote.command("events.sync", JSONObject().put("after", state.value.lastEventId))
+    }
+
+    private fun restoreOpenThread() {
+        val snapshot = state.value
+        val thread = snapshot.selectedThread ?: return
+        if (snapshot.threadLoaded || snapshot.loadingThread) return
+        update { it.copy(loadingThread = true, threadLoadProgress = 0) }
+        remote.command("thread.resume", JSONObject().put("threadId", thread.id))
     }
 
     private fun handleCodexEvent(event: JSONObject, refreshTitle: Boolean = true) {
@@ -579,8 +579,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     }
 
     private fun update(block: (UiState) -> UiState) {
-        if (Looper.myLooper() == Looper.getMainLooper()) state.value = block(state.value)
-        else android.os.Handler(Looper.getMainLooper()).post { state.value = block(state.value) }
+        onMain { state.value = block(state.value) }
+    }
+
+    private fun onMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) block()
+        else android.os.Handler(Looper.getMainLooper()).post { block() }
     }
 
     override fun onCleared() {

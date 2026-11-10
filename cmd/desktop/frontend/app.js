@@ -36,7 +36,8 @@ async function render(s){
   $('hero-dot').classList.toggle('online',online);$('side-dot').classList.toggle('online',online);
   text('hero-description',online?'手机现在可以访问电脑上的会话':'启动后自动连接 Codex 和中转服务器');
   text('codex-status',s.codexOnline?'已连接':'未连接');text('relay-status',s.relayOnline?'已连接':'未连接');
-  text('phone-status',`已配对 ${s.devices.length} 台`);
+  const onlineDevices=new Set(s.onlineDevices||[]);
+  text('phone-status',`在线 ${onlineDevices.size} 台`);
   text('relay-address',s.relayUrl?`${s.relayUrl} · ${s.projects} 个项目`:'尚未配置 Relay');
   if(initialRender){initialRender=false;if(!s.configured)showPage('server');}
   if(relaySavedURL!==s.relayUrl){relaySavedURL=s.relayUrl;$('relay').value=s.relayUrl||'';}
@@ -52,16 +53,17 @@ async function render(s){
   $('autostart').checked=s.autostart;$('keep-awake').checked=s.keepAwake;
   text('awake-status',s.awakeActive?'保持唤醒已生效，屏幕可以正常关闭':s.keepAwake?'后台启动后生效':'');
   if(!notice){$('notice').hidden=!s.error;$('notice').textContent=s.error||'';}
-  const nextDevices=JSON.stringify(s.devices);
+  const nextDevices=JSON.stringify([s.devices,[...onlineDevices]]);
   if(devicesKey!==nextDevices){
     devicesKey=nextDevices;const list=$('device-list');list.replaceChildren();
     if(!s.devices.length){const p=document.createElement('p');p.textContent='还没有已配对设备。请在连接与配对页面连接手机。';list.append(p);}
     for(const id of s.devices){
       const row=document.createElement('div');row.className='device';
       const label=document.createElement('code');label.textContent=id;
+      const status=document.createElement('span');status.className='muted';status.textContent=onlineDevices.has(id)?'在线':'离线授权记录';
       const remove=document.createElement('button');remove.textContent='移除设备';
       remove.onclick=()=>{if(window.confirm('移除该手机的访问权限？'))act(()=>api().RevokeDevice(id));};
-      row.append(label,remove);list.append(row);
+      row.append(label,status,remove);list.append(row);
     }
   }
   const logs=$('log-output'),atEnd=logs.scrollHeight-logs.scrollTop-logs.clientHeight<40;
